@@ -3,8 +3,8 @@
   "name": "My lil MCP",
   "version": "2.0.0",
   "license": "MIT",
-  "brand": "My lil",
-  "author": "A_Development",
+  "brand": "A_Development",
+  "author": "Ari Klopfer",
   "authorEmail": "",
   "authorUrl": "https://github.com/Adev-io",
   "pluginUrl": "https://github.com/Adev-io/my-lil-mcp",
@@ -16,7 +16,7 @@
   "modules": [
     {
       "slug": "Mcp",
-      "name": "My lil MCP",
+      "name": "MCP",
       "description": "Local MCP server (127.0.0.1 only) so a coding agent can read, patch, undo, measure and save the running patch.",
       "tags": ["Utility", "External"]
     }

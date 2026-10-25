@@ -13,6 +13,7 @@
 #include <app/RackWidget.hpp>
 #include <app/ModuleWidget.hpp>
 #include <tag.hpp>
+#include "Json.h"
 
 #include <sstream>
 #include <cstring>
@@ -66,41 +67,6 @@ void UITaskQueue::drain() {
         }
         local.pop();
     }
-}
-
-// ─── tiny JSON builder helpers ─────────────────────────────────────────────
-
-// ─── JSON helpers ─────────────────────────────────────────────────────────────
-
-static std::string jsonStr(const std::string& s) {
-    std::string out = "\"";
-    for (char c : s) {
-        switch (c) {
-            case '"':  out += "\\\""; break;
-            case '\\': out += "\\\\"; break;
-            case '\n': out += "\\n";  break;
-            case '\r': out += "\\r";  break;
-            case '\t': out += "\\t";  break;
-            default:   out += c;      break;
-        }
-    }
-    return out + "\"";
-}
-
-static std::string jsonKV(const std::string& k, const std::string& v, bool last = false) {
-    return jsonStr(k) + ": " + v + (last ? "" : ", ");
-}
-
-static std::string jsonKVs(const std::string& k, const std::string& s, bool last = false) {
-    return jsonStr(k) + ": " + jsonStr(s) + (last ? "" : ", ");
-}
-
-static std::string ok(const std::string& body) {
-    return "{" + jsonKVs("status", "ok") + jsonKV("data", body, true) + "}";
-}
-
-static std::string err(const std::string& msg) {
-    return "{" + jsonKVs("status", "error") + jsonKVs("message", msg, true) + "}";
 }
 
 // ─── Module serialisation helpers ─────────────────────────────────────────
@@ -239,118 +205,6 @@ static std::string serializePlugin(plugin::Plugin* plug) {
     }
     s += "]}";
     return s;
-}
-
-// ─── Simple JSON parser ────────────────────────────────────────────────────
-
-static std::string parseJsonString(const std::string& json, const std::string& key) {
-    std::string searchKey = "\"" + key + "\"";
-    auto pos = json.find(searchKey);
-    if (pos == std::string::npos) return "";
-    pos = json.find(':', pos + searchKey.size());
-    if (pos == std::string::npos) return "";
-    pos = json.find('"', pos + 1);
-    if (pos == std::string::npos) return "";
-    auto end = json.find('"', pos + 1);
-    if (end == std::string::npos) return "";
-    return json.substr(pos + 1, end - pos - 1);
-}
-
-static double parseJsonDouble(const std::string& json, const std::string& key, double def = 0.0) {
-    std::string searchKey = "\"" + key + "\"";
-    auto pos = json.find(searchKey);
-    if (pos == std::string::npos) return def;
-    pos = json.find(':', pos + searchKey.size());
-    if (pos == std::string::npos) return def;
-    while (pos < json.size() && (json[pos] == ':' || json[pos] == ' ')) pos++;
-    // Handle quoted string numbers (AI sometimes sends numbers as JSON strings)
-    if (pos < json.size() && json[pos] == '"') pos++;
-    try { return std::stod(json.substr(pos)); } catch (...) { return def; }
-}
-
-// Extract raw JSON value (string, number, object, array, bool, null) by key
-static std::string parseRawValue(const std::string& json, const std::string& key) {
-    std::string sk = "\"" + key + "\"";
-    auto p = json.find(sk);
-    if (p == std::string::npos) return "";
-    p += sk.size();
-    while (p < json.size() && (json[p] == ' ' || json[p] == ':' || json[p] == '\t' || json[p] == '\n')) p++;
-    if (p >= json.size()) return "";
-    char c = json[p];
-    if (c == '"') {
-        auto e = p + 1;
-        while (e < json.size()) {
-            if (json[e] == '\\') { e += 2; continue; }
-            if (json[e] == '"') break;
-            e++;
-        }
-        return json.substr(p, e - p + 1);
-    } else if (c == '{' || c == '[') {
-        char open = c, close = (c == '{') ? '}' : ']';
-        int depth = 0;
-        auto start = p;
-        bool inStr = false;
-        for (; p < json.size(); p++) {
-            char ch = json[p];
-            if (ch == '\\') { p++; continue; }
-            if (ch == '"') { inStr = !inStr; continue; }
-            if (inStr) continue;
-            if (ch == open) depth++;
-            else if (ch == close && --depth == 0) return json.substr(start, p - start + 1);
-        }
-        return "";
-    } else {
-        auto e = p;
-        while (e < json.size() && json[e] != ',' && json[e] != '}' && json[e] != ']'
-               && json[e] != ' ' && json[e] != '\n' && json[e] != '\r') e++;
-        return json.substr(p, e - p);
-    }
-}
-
-// Extract the JSON-RPC "id" field as raw JSON (preserves number/string/null type)
-static std::string parseJsonRpcId(const std::string& body) {
-    std::string key = "\"id\"";
-    auto pos = body.find(key);
-    if (pos == std::string::npos) return "null";
-    pos += key.size();
-    while (pos < body.size() && (body[pos] == ' ' || body[pos] == ':' || body[pos] == '\t')) pos++;
-    if (pos >= body.size()) return "null";
-    char c = body[pos];
-    if (c == '"') {
-        auto end = pos + 1;
-        while (end < body.size()) {
-            if (body[end] == '\\') { end += 2; continue; }
-            if (body[end] == '"') break;
-            end++;
-        }
-        return body.substr(pos, end - pos + 1);
-    } else if (c == 'n') {
-        return "null";
-    } else {
-        auto end = pos;
-        while (end < body.size() && body[end] != ',' && body[end] != '}'
-               && body[end] != ' ' && body[end] != '\r' && body[end] != '\n') end++;
-        return body.substr(pos, end - pos);
-    }
-}
-
-// ─── JSON-RPC 2.0 / MCP response builders ─────────────────────────────────
-
-static std::string mcpOk(const std::string& id, const std::string& result) {
-    return "{\"jsonrpc\":\"2.0\",\"id\":" + id + ",\"result\":" + result + "}";
-}
-
-static std::string mcpErr(const std::string& id, int code, const std::string& msg) {
-    return "{\"jsonrpc\":\"2.0\",\"id\":" + id +
-           ",\"error\":{\"code\":" + std::to_string(code) + ",\"message\":" + jsonStr(msg) + "}}";
-}
-
-static std::string toolOk(const std::string& text) {
-    return "{\"content\":[{\"type\":\"text\",\"text\":" + jsonStr(text) + "}],\"isError\":false}";
-}
-
-static std::string toolFail(const std::string& text) {
-    return "{\"content\":[{\"type\":\"text\",\"text\":" + jsonStr(text) + "}],\"isError\":true}";
 }
 
 static std::string getMcpModulePositionJson(app::RackWidget* rackWidget, int64_t mcpId) {
