@@ -1,5 +1,6 @@
 CXX ?= g++
-CXXFLAGS ?= -std=c++17 -O2 -Wall -Wextra -I../core
+CXXFLAGS ?= -std=c++17 -O2 -Wall -Wextra
+CXXFLAGS += -I../core
 BIN := ../build/tests.exe
 
 all: run

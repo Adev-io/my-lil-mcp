@@ -14,6 +14,7 @@
 #include <app/ModuleWidget.hpp>
 #include <tag.hpp>
 #include "Json.h"
+#include "Guard.h"
 
 #include <sstream>
 #include <cstring>
@@ -1147,10 +1148,23 @@ void RackHttpServer::handleMcpPost(const httplib::Request& req, httplib::Respons
 void RackHttpServer::setupRoutes() {
         rackApp = APP;
         auto* rackApp = this->rackApp; // local alias for lambda captures
-        svr.set_pre_routing_handler([](const httplib::Request&, httplib::Response& res) {
-            res.set_header("Access-Control-Allow-Origin", "*");
-            res.set_header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS");
-            res.set_header("Access-Control-Allow-Headers", "Content-Type");
+        svr.set_pre_routing_handler([](const httplib::Request& req, httplib::Response& res) {
+            if (!guard::isLoopbackHost(req.get_header_value("Host"))) {
+                res.status = 403;
+                res.set_content(err("Host must be loopback"), "application/json");
+                return httplib::Server::HandlerResponse::Handled;
+            }
+            const std::string origin = req.get_header_value("Origin");
+            if (!guard::isAllowedOrigin(origin)) {
+                res.status = 403;
+                res.set_content(err("Origin not allowed"), "application/json");
+                return httplib::Server::HandlerResponse::Handled;
+            }
+            if (!origin.empty()) {
+                res.set_header("Access-Control-Allow-Origin", origin);
+                res.set_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+                res.set_header("Access-Control-Allow-Headers", "Content-Type");
+            }
             res.set_header("Content-Type", "application/json");
             return httplib::Server::HandlerResponse::Unhandled;
         });

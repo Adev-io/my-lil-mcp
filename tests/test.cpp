@@ -1,6 +1,7 @@
 // test.cpp: checks for the Rack-free core (JSON helpers, request guard, meter). Run: make test
 // Author: Ari Klopfer / A_Development. MIT
 #include "Json.h"
+#include "Guard.h"
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
@@ -29,6 +30,7 @@ void testJson()
     check (parseJsonDouble ("{}", "x", -1) == -1, "parseJsonDouble missing -> default");
     check (parseRawValue ("{\"params\": [{\"id\": 1}, {\"id\": 2}], \"k\": 1}", "params") == "[{\"id\": 1}, {\"id\": 2}]", "parseRawValue nested array");
     check (parseRawValue ("{\"s\": \"a}b\"}", "s") == "\"a}b\"", "parseRawValue string keeps its quotes and braces");
+    check (parseRawValue ("{\"s\": \"a\\\"b\", \"k\": 1}", "s") == "\"a\\\"b\"", "parseRawValue string with escaped quote");
     check (parseRawValue ("{\"b\": true}", "b") == "true", "parseRawValue bare literal");
     check (parseJsonRpcId ("{\"id\": 7, \"method\": \"ping\"}") == "7", "rpc id number");
     check (parseJsonRpcId ("{\"id\": \"abc\"}") == "\"abc\"", "rpc id string");
@@ -36,11 +38,29 @@ void testJson()
     check (toolOk ("{}") == "{\"content\":[{\"type\":\"text\",\"text\":\"{}\"}],\"isError\":false}", "toolOk shape");
     check (mcpErr ("1", -32601, "nope") == "{\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32601,\"message\":\"nope\"}}", "mcpErr shape");
 }
+
+void testGuard()
+{
+    check (guard::isLoopbackHost ("127.0.0.1"), "host 127.0.0.1");
+    check (guard::isLoopbackHost ("127.0.0.1:2600"), "host 127.0.0.1:2600");
+    check (guard::isLoopbackHost ("localhost:2600"), "host localhost:2600");
+    check (guard::isLoopbackHost ("[::1]:2600"), "host [::1]:2600");
+    check (! guard::isLoopbackHost ("evil.com"), "foreign host refused");
+    check (! guard::isLoopbackHost ("127.0.0.1.evil.com"), "prefix-spoofed host refused");
+    check (! guard::isLoopbackHost (""), "empty host refused");
+    check (guard::isAllowedOrigin (""), "no Origin header (curl, Claude Code) allowed");
+    check (guard::isAllowedOrigin ("http://localhost:5173"), "loopback origin allowed");
+    check (guard::isAllowedOrigin ("http://127.0.0.1"), "loopback origin without port allowed");
+    check (! guard::isAllowedOrigin ("https://evil.com"), "foreign origin refused");
+    check (! guard::isAllowedOrigin ("http://localhost.evil.com"), "spoofed loopback origin refused");
+    check (! guard::isAllowedOrigin ("null"), "opaque origin refused");
+}
 } // namespace
 
 int main()
 {
     testJson();
+    testGuard();
     std::printf ("%s (%d failures)\n", failures ? "FAILED" : "all ok", failures);
     return failures ? 1 : 0;
 }
