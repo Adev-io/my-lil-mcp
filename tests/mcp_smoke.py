@@ -113,7 +113,8 @@ STEPS = []   # (base, vco) -> None; later tasks append to this list
 
 
 def test_undo_redo(base, vco):
-    call(base, 'vcvrack_undo')
+    r = call(base, 'vcvrack_undo')
+    check(r['action'] == 'MCP add module', 'first undo is our add', r['action'])
     check(vco['id'] not in module_ids(base), 'undo removes the module the agent added')
     call(base, 'vcvrack_redo')
     check(vco['id'] in module_ids(base), 'redo brings it back with the same id')

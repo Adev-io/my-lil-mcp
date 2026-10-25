@@ -18,6 +18,7 @@
 
 #include <sstream>
 #include <cstring>
+#include <cmath>
 #include <functional>
 #include <set>
 
@@ -630,6 +631,20 @@ static std::string buildLayoutJson(const std::map<int, RowInfo>& rows, const std
          + ",\"rows\":" + rowsJson
          + ",\"suggested_positions\":" + sugJson + "}";
 }
+
+// True when performing `a` (undo of an add, or redo of a remove) would delete module `id`. Running that from the
+// module's own step() would free the widget whose step() is on the stack, so the undo tools refuse it.
+static bool wouldRemoveModule(history::Action* a, int64_t id, bool redo) {
+    if (auto* c = dynamic_cast<history::ComplexAction*>(a)) {
+        for (history::Action* sub : c->actions) if (wouldRemoveModule(sub, id, redo)) return true;
+        return false;
+    }
+    const bool isRemove = dynamic_cast<history::ModuleRemove*>(a) != nullptr;
+    auto* add = dynamic_cast<history::ModuleAdd*>(a);   // also matches ModuleRemove (it derives from ModuleAdd)
+    if (!add || add->moduleId != id) return false;
+    return redo ? isRemove : !isRemove;
+}
+
 // ─── MCP tool dispatcher ────────────────────────────────────────────────
 
 std::string RackHttpServer::dispatchTool(const std::string& name, const std::string& args) {
@@ -846,7 +861,8 @@ std::string RackHttpServer::dispatchTool(const std::string& name, const std::str
                     double value = parseJsonDouble(obj, "value", 0.0);
                     if (paramId >= 0 && paramId < (int)mod->params.size()) {
                         ParamQuantity* pq = mod->paramQuantities[paramId];
-                        float v = pq ? math::clamp((float)value, pq->minValue, pq->maxValue) : (float)value;
+                        float v = pq ? math::clampSafe((float)value, pq->getMinValue(), pq->getMaxValue()) : (float)value;
+                        if (pq && pq->snapEnabled) v = std::round(v);
                         history::ParamChange* h = new history::ParamChange;
                         h->name = "MCP set param";
                         h->moduleId = id;
@@ -1042,14 +1058,18 @@ std::string RackHttpServer::dispatchTool(const std::string& name, const std::str
 
         if (name == "vcvrack_undo" || name == "vcvrack_redo") {
             const bool redo = (name == "vcvrack_redo");
-            std::string done; bool did = false;
-            if (!taskQueue->postSync([rackApp, redo, &done, &did]() {
+            const int64_t me = parent ? parent->id : -1;
+            std::string done; bool did = false; bool refused = false;
+            if (!taskQueue->postSync([rackApp, redo, me, &done, &did, &refused]() {
                 history::State* h = rackApp->history;
                 if (redo ? !h->canRedo() : !h->canUndo()) return;
+                history::Action* next = redo ? h->actions[h->actionIndex] : h->actions[h->actionIndex - 1];
+                if (wouldRemoveModule(next, me, redo)) { refused = true; return; }
                 done = redo ? h->getRedoName() : h->getUndoName();
                 if (redo) h->redo(); else h->undo();
                 did = true;
             }, name)) return toolFail("UI thread not responding (timed out)");
+            if (refused) return toolFail("That step would remove the My lil MCP module itself; do it with Ctrl+Z in Rack instead.");
             if (!did) return toolFail(redo ? "Nothing to redo" : "Nothing to undo");
             return toolOk("{\"action\":" + jsonStr(done) + "}");
         }
