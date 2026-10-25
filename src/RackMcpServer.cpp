@@ -302,7 +302,9 @@ static const char* MCP_TOOLS_JSON = R"json([
 {"name":"vcvrack_delete_cable","description":"Remove a cable connection by cable ID.","inputSchema":{"type":"object","properties":{"id":{"type":"integer","description":"Cable ID"}},"required":["id"]}},
 {"name":"vcvrack_get_sample_rate","description":"Get the current audio engine sample rate in Hz.","inputSchema":{"type":"object","properties":{}}},
 {"name":"vcvrack_search_library","description":"Search the installed plugin library for modules. Two modes:\n1. Single search: pass 'q' and/or 'tags'.\n2. Multi-search: pass 'queries' array to find needed module groups in ONE call (each keyed by its 'label' in the response). Always prefer multi-search when building a patch.\n\nIMPORTANT: 'tags' must use real VCV Rack Browser tag names (not module-type shorthand). Common valid tags: 'Oscillator', 'Filter', 'Amplifier', 'Envelope Generator', 'LFO', 'Sequencer', 'Mixer', 'Effect', 'Utility'. For example, use 'Filter' instead of 'VCF', and 'Amplifier' instead of 'VCA'.","inputSchema":{"type":"object","properties":{"q":{"type":"string","description":"Search query matching slug, name, or description (single search)"},"tags":{"type":"string","description":"Tag filter using VCV Rack tag names, e.g. 'Oscillator', 'Filter', 'Amplifier', 'Envelope Generator', 'LFO', 'Mixer' (single search). Avoid shorthand like 'VCF'/'VCA'."},"queries":{"type":"array","description":"Multi-search: array of independent queries returned grouped by label. Use to find all needed module types in one call.","items":{"type":"object","properties":{"label":{"type":"string","description":"Key for these results in the response e.g. 'osc', 'filter', 'amp'"},"q":{"type":"string","description":"Search query"},"tags":{"type":"string","description":"Tag filter using VCV Rack tag names, e.g. 'Oscillator', 'Filter', 'Amplifier'"}},"required":["label"]}}},"required":[]}},
-{"name":"vcvrack_get_plugin","description":"Get detailed information about an installed plugin and its full module list.","inputSchema":{"type":"object","properties":{"plugin_slug":{"type":"string","description":"Plugin slug"}},"required":["plugin_slug"]}}
+{"name":"vcvrack_get_plugin","description":"Get detailed information about an installed plugin and its full module list.","inputSchema":{"type":"object","properties":{"plugin_slug":{"type":"string","description":"Plugin slug"}},"required":["plugin_slug"]}},
+{"name":"vcvrack_undo","description":"Undo the most recent action in Rack's history (yours or the user's). Every edit this server makes is undoable: add/delete module, add/delete cable, set params, bypass, move, set module state. Returns the name of the action undone.","inputSchema":{"type":"object","properties":{}}},
+{"name":"vcvrack_redo","description":"Redo the most recently undone action. Returns the name of the action redone.","inputSchema":{"type":"object","properties":{}}}
 ])json";
 
 // ─── MCP prompts ────────────────────────────────────────────────────────────
@@ -779,6 +781,10 @@ std::string RackHttpServer::dispatchTool(const std::string& name, const std::str
                 finalX = mw->box.pos.x;
                 finalY = mw->box.pos.y;
                 finalW = mw->box.size.x;
+                history::ModuleAdd* h = new history::ModuleAdd;
+                h->name = "MCP add module";
+                h->setModule(mw);
+                rackApp->history->push(h);
             }, "add_module/" + pSlug + "/" + mSlug)) return toolFail("UI thread not responding (timed out)");
             if (moduleId < 0 || finalW <= 0.f) return toolFail("Failed to create module (outside matrix preferences or invalid model)");
             return toolOk("{\"id\":" + std::to_string(moduleId)
@@ -827,6 +833,8 @@ std::string RackHttpServer::dispatchTool(const std::string& name, const std::str
                 engine::Module* mod = rackApp->engine->getModule(id);
                 if (!mod) return;
                 found = true;
+                history::ComplexAction* batch = new history::ComplexAction;
+                batch->name = "MCP set params";
                 size_t pos = 0;
                 while (pos < paramsRaw.size()) {
                     size_t start = paramsRaw.find('{', pos);
@@ -837,11 +845,21 @@ std::string RackHttpServer::dispatchTool(const std::string& name, const std::str
                     int paramId = (int)parseJsonDouble(obj, "id", -1);
                     double value = parseJsonDouble(obj, "value", 0.0);
                     if (paramId >= 0 && paramId < (int)mod->params.size()) {
-                        rackApp->engine->setParamValue(mod, paramId, (float)value);
+                        ParamQuantity* pq = mod->paramQuantities[paramId];
+                        float v = pq ? math::clamp((float)value, pq->minValue, pq->maxValue) : (float)value;
+                        history::ParamChange* h = new history::ParamChange;
+                        h->name = "MCP set param";
+                        h->moduleId = id;
+                        h->paramId = paramId;
+                        h->oldValue = rackApp->engine->getParamValue(mod, paramId);
+                        h->newValue = v;
+                        batch->push(h);
+                        rackApp->engine->setParamValue(mod, paramId, v);
                         applied++;
                     }
                     pos = end + 1;
                 }
+                if (batch->isEmpty()) delete batch; else rackApp->history->push(batch);
             }, "set_params/" + std::to_string(id))) return toolFail("UI thread not responding (timed out)");
             if (!found) return toolFail("Module not found: " + std::to_string(id));
             return toolOk("{\"applied\":" + std::to_string(applied) + "}");
@@ -897,6 +915,10 @@ std::string RackHttpServer::dispatchTool(const std::string& name, const std::str
                 cw->outputPort = oPort;
                 cw->inputPort = iPort;
                 rackApp->scene->rack->addCable(cw);
+                history::CableAdd* h = new history::CableAdd;
+                h->name = "MCP add cable";
+                h->setCable(cw);
+                rackApp->history->push(h);
             }, "add_cable/" + std::to_string(outM) + "→" + std::to_string(inM))) return toolFail("UI thread not responding (timed out)");
             if (cableId < 0) return toolFail("Failed to connect: ports or modules not found");
             return toolOk("{\"id\":" + std::to_string(cableId) + "}");
@@ -908,14 +930,14 @@ std::string RackHttpServer::dispatchTool(const std::string& name, const std::str
             if (!taskQueue->postSync([rackApp, id, &found]() {
                 if (!rackApp->engine || !rackApp->scene || !rackApp->scene->rack) return;
                 app::CableWidget* cw = rackApp->scene->rack->getCable(id);
-                if (cw) {
-                    found = true;
-                    rackApp->scene->rack->removeCable(cw);
-                    delete cw;
-                } else {
-                    engine::Cable* c = rackApp->engine->getCable(id);
-                    if (c) { found = true; rackApp->engine->removeCable(c); delete c; }
-                }
+                if (!cw) return;
+                found = true;
+                history::CableRemove* h = new history::CableRemove;
+                h->name = "MCP remove cable";
+                h->setCable(cw);
+                rackApp->history->push(h);
+                rackApp->scene->rack->removeCable(cw);
+                delete cw;
             }, "delete_cable/" + std::to_string(id))) return toolFail("UI thread not responding (timed out)");
             if (!found) return toolFail("Cable not found: " + std::to_string(id));
             return toolOk("{\"removed\":true}");
@@ -1016,6 +1038,20 @@ std::string RackHttpServer::dispatchTool(const std::string& name, const std::str
             for (plugin::Plugin* p : rack::plugin::plugins)
                 if (p->slug == slug) return toolOk(serializePlugin(p));
             return toolFail("Plugin not found: " + slug);
+        }
+
+        if (name == "vcvrack_undo" || name == "vcvrack_redo") {
+            const bool redo = (name == "vcvrack_redo");
+            std::string done; bool did = false;
+            if (!taskQueue->postSync([rackApp, redo, &done, &did]() {
+                history::State* h = rackApp->history;
+                if (redo ? !h->canRedo() : !h->canUndo()) return;
+                done = redo ? h->getRedoName() : h->getUndoName();
+                if (redo) h->redo(); else h->undo();
+                did = true;
+            }, name)) return toolFail("UI thread not responding (timed out)");
+            if (!did) return toolFail(redo ? "Nothing to redo" : "Nothing to undo");
+            return toolOk("{\"action\":" + jsonStr(done) + "}");
         }
 
         return toolFail("Unknown tool: " + name);
@@ -1138,10 +1174,8 @@ void RackHttpServer::setupRoutes() {
         // MCP Streamable HTTP transport: JSON-RPC 2.0 over POST; GET answers with an empty event stream.
         svr.Post("/mcp", [this](const httplib::Request& req, httplib::Response& res) { handleMcpPost(req, res); });
         svr.Get("/mcp", [](const httplib::Request&, httplib::Response& res) {
-            res.set_header("Content-Type", "text/event-stream");
             res.set_header("Cache-Control", "no-cache");
-            res.body   = ": My lil MCP\n\n";
-            res.status = 200;
+            res.set_content(": My lil MCP\n\n", "text/event-stream");
         });
 
         svr.set_logger([this](const httplib::Request&, const httplib::Response&) {

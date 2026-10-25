@@ -12,7 +12,8 @@ import urllib.request
 
 EXPECTED_TOOLS = ['vcvrack_get_status', 'vcvrack_list_modules', 'vcvrack_get_module', 'vcvrack_add_module',
                   'vcvrack_delete_module', 'vcvrack_get_params', 'vcvrack_set_params', 'vcvrack_list_cables',
-                  'vcvrack_add_cable', 'vcvrack_delete_cable', 'vcvrack_search_library', 'vcvrack_get_rack_layout']
+                  'vcvrack_add_cable', 'vcvrack_delete_cable', 'vcvrack_search_library', 'vcvrack_get_rack_layout',
+                  'vcvrack_undo', 'vcvrack_redo']
 fails = 0
 
 
@@ -75,6 +76,8 @@ def add_vco(base):
     lib = call(base, 'vcvrack_search_library', {'q': 'VCO'})
     fund = next((p for p in lib if p['slug'] == 'Fundamental'), None)
     check(fund is not None, 'Fundamental is installed')
+    if fund is None:
+        sys.exit(1)
     slug = 'VCO' if any(m['slug'] == 'VCO' for m in fund['modules']) else fund['modules'][0]['slug']
     pos = call(base, 'vcvrack_get_rack_layout')['suggested_positions'][0]
     vco = call(base, 'vcvrack_add_module', {'plugin_slug': 'Fundamental', 'module_slug': slug, 'x': pos['x'], 'y': pos['y']})
@@ -89,6 +92,7 @@ def remove(base, vco):
 
 
 def main():
+    urllib.request.install_opener(urllib.request.build_opener(urllib.request.ProxyHandler({})))
     ap = argparse.ArgumentParser()
     ap.add_argument('--port', type=int, default=2600)
     a = ap.parse_args()
@@ -106,6 +110,37 @@ def main():
 
 
 STEPS = []   # (base, vco) -> None; later tasks append to this list
+
+
+def test_undo_redo(base, vco):
+    call(base, 'vcvrack_undo')
+    check(vco['id'] not in module_ids(base), 'undo removes the module the agent added')
+    call(base, 'vcvrack_redo')
+    check(vco['id'] in module_ids(base), 'redo brings it back with the same id')
+    params = call(base, 'vcvrack_get_params', {'moduleId': vco['id']})
+    freq = next(p for p in params if p['name'].lower().startswith('freq'))
+    r = call(base, 'vcvrack_set_params', {'moduleId': vco['id'], 'params': [{'id': freq['id'], 'value': freq['max'] + 100}]})
+    check(r['applied'] == 1, 'set_params applied')
+    now = next(p for p in call(base, 'vcvrack_get_params', {'moduleId': vco['id']}) if p['id'] == freq['id'])
+    check(abs(now['value'] - freq['max']) < 1e-4, 'set_params clamps to the param range', now['value'])
+    r = call(base, 'vcvrack_undo')
+    check(r['action'] == 'MCP set params', 'undo names the action', r['action'])
+    now = next(p for p in call(base, 'vcvrack_get_params', {'moduleId': vco['id']}) if p['id'] == freq['id'])
+    check(abs(now['value'] - freq['value']) < 1e-4, 'undo restores the param', now['value'])
+    # A feedback cable from the VCO's first output into its own first input: valid in Rack, needs no other module.
+    c = call(base, 'vcvrack_add_cable', {'outputModuleId': vco['id'], 'outputId': 0, 'inputModuleId': vco['id'], 'inputId': 0})
+    check(any(x['id'] == c['id'] for x in call(base, 'vcvrack_list_cables')), 'add_cable', c['id'])
+    call(base, 'vcvrack_undo')
+    check(not any(x['id'] == c['id'] for x in call(base, 'vcvrack_list_cables')), 'undo removes the cable')
+    call(base, 'vcvrack_redo')
+    call(base, 'vcvrack_delete_cable', {'id': c['id']})
+    check(not any(x['id'] == c['id'] for x in call(base, 'vcvrack_list_cables')), 'delete_cable')
+    call(base, 'vcvrack_undo')
+    check(any(x['id'] == c['id'] for x in call(base, 'vcvrack_list_cables')), 'undo restores the deleted cable')
+    call(base, 'vcvrack_delete_cable', {'id': c['id']})
+
+
+STEPS.append(test_undo_redo)
 
 if __name__ == '__main__':
     main()
