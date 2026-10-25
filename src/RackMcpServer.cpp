@@ -801,15 +801,20 @@ std::string RackHttpServer::dispatchTool(const std::string& name, const std::str
                 }
                 rackApp->engine->addModule(m);
                 moduleId = m->id;
+                rackApp->scene->rack->updateModuleOldPositions();
                 rackApp->scene->rack->addModule(mw);
                 rackApp->scene->rack->setModulePosForce(mw, math::Vec(x, y));
                 finalX = mw->box.pos.x;
                 finalY = mw->box.pos.y;
                 finalW = mw->box.size.x;
-                history::ModuleAdd* h = new history::ModuleAdd;
-                h->name = "MCP add module";
-                h->setModule(mw);
-                rackApp->history->push(h);
+                history::ComplexAction* batch = new history::ComplexAction;
+                batch->name = "MCP add module";
+                history::ModuleAdd* ha = new history::ModuleAdd;
+                ha->setModule(mw);
+                batch->push(ha);
+                history::ComplexAction* drag = rackApp->scene->rack->getModuleDragAction();
+                if (drag && !drag->isEmpty()) batch->push(drag); else delete drag;
+                rackApp->history->push(batch);
             }, "add_module/" + pSlug + "/" + mSlug)) return toolFail("UI thread not responding (timed out)");
             if (moduleId < 0 || finalW <= 0.f) return toolFail("Failed to create module (outside matrix preferences or invalid model)");
             return toolOk("{\"id\":" + std::to_string(moduleId)
@@ -1086,7 +1091,13 @@ std::string RackHttpServer::dispatchTool(const std::string& name, const std::str
 
         if (name == "vcvrack_save_patch") {
             std::string path = parseJsonString(args, "path");
-            std::string finalPath, why; bool saved = false; double bytes = 0;
+            if (!path.empty()) {
+                std::string ext = path.size() >= 4 ? path.substr(path.size() - 4) : "";
+                for (char& c : ext) if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
+                if (ext != ".vcv") return toolFail("path must end in .vcv");
+            }
+            std::string finalPath, why = "Save failed (bad path, or directory not writable?)";
+            bool saved = false; double bytes = 0;
             if (!taskQueue->postSync([rackApp, path, &finalPath, &why, &saved, &bytes]() {
                 patch::Manager* pm = rackApp->patch;
                 std::string p = path.empty() ? pm->path : path;
@@ -1104,13 +1115,15 @@ std::string RackHttpServer::dispatchTool(const std::string& name, const std::str
         if (name == "vcvrack_bypass_module") {
             int64_t id = (int64_t)parseJsonDouble(args, "id", -1);
             std::string raw = parseRawValue(args, "bypassed");
+            if (raw.empty()) return toolFail("bypassed (true/false) is required");
             const bool bypassed = (raw == "true" || raw == "1");
             bool found = false;
             if (!taskQueue->postSync([rackApp, id, bypassed, &found]() {
                 app::ModuleWidget* mw = rackApp->scene->rack->getModule(id);
                 if (!mw) return;
                 found = true;
-                mw->bypassAction(bypassed);   // Rack's own action: pushes history
+                // Rack's own action always pushes history, so only call it when the state changes
+                if (mw->module && mw->module->isBypassed() != bypassed) mw->bypassAction(bypassed);
             }, "bypass_module/" + std::to_string(id))) return toolFail("UI thread not responding (timed out)");
             if (!found) return toolFail("Module not found: " + std::to_string(id));
             return toolOk("{\"id\":" + std::to_string(id) + ",\"bypassed\":" + (bypassed ? "true" : "false") + "}");
@@ -1125,13 +1138,10 @@ std::string RackHttpServer::dispatchTool(const std::string& name, const std::str
                 app::ModuleWidget* mw = rackApp->scene->rack->getModule(id);
                 if (!mw) return;
                 found = true;
-                history::ModuleMove* h = new history::ModuleMove;
-                h->name = "MCP move module";
-                h->moduleId = id;
-                h->oldPos = mw->box.pos;
+                rackApp->scene->rack->updateModuleOldPositions();
                 rackApp->scene->rack->setModulePosForce(mw, math::Vec(x, y));
-                h->newPos = mw->box.pos;
-                rackApp->history->push(h);
+                history::ComplexAction* h = rackApp->scene->rack->getModuleDragAction();
+                if (h && !h->isEmpty()) { h->name = "MCP move module"; rackApp->history->push(h); } else delete h;
                 fx = mw->box.pos.x; fy = mw->box.pos.y;
             }, "move_module/" + std::to_string(id))) return toolFail("UI thread not responding (timed out)");
             if (!found) return toolFail("Module not found: " + std::to_string(id));
@@ -1159,14 +1169,14 @@ std::string RackHttpServer::dispatchTool(const std::string& name, const std::str
             std::string state = parseRawValue(args, "state");
             json_error_t jerr;
             json_t* newJ = state.empty() ? nullptr : json_loads(state.c_str(), 0, &jerr);
-            if (!newJ) return toolFail("state must be a JSON object as returned by vcvrack_get_module_state");
+            if (!newJ || !json_is_object(newJ)) { if (newJ) json_decref(newJ); return toolFail("state must be a JSON object as returned by vcvrack_get_module_state"); }
             std::string why; bool done = false;
             if (!taskQueue->postSync([rackApp, id, newJ, &why, &done]() {
                 engine::Module* mod = rackApp->engine->getModule(id);
                 if (!mod) { why = "Module not found: " + std::to_string(id); return; }
                 json_t* modelJ = json_object_get(newJ, "model");
-                if (modelJ && mod->model && mod->model->slug != json_string_value(modelJ)) {
-                    why = "state is for model " + std::string(json_string_value(modelJ)) + ", this module is " + mod->model->slug;
+                if (modelJ && mod->model && (!json_is_string(modelJ) || mod->model->slug != json_string_value(modelJ))) {
+                    why = std::string("state is for model ") + (json_is_string(modelJ) ? json_string_value(modelJ) : "?") + ", this module is " + mod->model->slug;
                     return;
                 }
                 history::ModuleChange* h = new history::ModuleChange;
@@ -1177,7 +1187,10 @@ std::string RackHttpServer::dispatchTool(const std::string& name, const std::str
                 h->newModuleJ = rackApp->engine->moduleToJson(mod);
                 rackApp->history->push(h);
                 done = true;
-            }, "set_module_state/" + std::to_string(id))) { json_decref(newJ); return toolFail("UI thread not responding (timed out)"); }
+            }, "set_module_state/" + std::to_string(id))) {
+                // task may still run: leak newJ rather than free it under the UI thread
+                return toolFail("UI thread not responding (timed out)");
+            }
             json_decref(newJ);
             if (!done) return toolFail(why);
             return toolOk("{\"id\":" + std::to_string(id) + ",\"applied\":true}");

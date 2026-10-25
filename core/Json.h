@@ -35,6 +35,56 @@ inline std::string jsonKVs (const std::string& k, const std::string& s, bool las
 inline std::string ok (const std::string& body) { return "{" + jsonKVs ("status", "ok") + jsonKV ("data", body, true) + "}"; }
 inline std::string err (const std::string& msg) { return "{" + jsonKVs ("status", "error") + jsonKVs ("message", msg, true) + "}"; }
 
+// Decodes a JSON string body (the text between the quotes): \" \\ \/ \b \f \n \r \t and \uXXXX (UTF-16 pairs to UTF-8).
+inline std::string jsonUnescape (const std::string& s)
+{
+    std::string out;
+    auto putUtf8 = [&out] (unsigned cp)
+    {
+        if (cp < 0x80) out += (char) cp;
+        else if (cp < 0x800) { out += (char) (0xC0 | (cp >> 6)); out += (char) (0x80 | (cp & 0x3F)); }
+        else if (cp < 0x10000) { out += (char) (0xE0 | (cp >> 12)); out += (char) (0x80 | ((cp >> 6) & 0x3F)); out += (char) (0x80 | (cp & 0x3F)); }
+        else { out += (char) (0xF0 | (cp >> 18)); out += (char) (0x80 | ((cp >> 12) & 0x3F)); out += (char) (0x80 | ((cp >> 6) & 0x3F)); out += (char) (0x80 | (cp & 0x3F)); }
+    };
+    auto hex4 = [&s] (size_t at, unsigned& v)
+    {
+        if (at + 4 > s.size()) return false;
+        v = 0;
+        for (size_t i = at; i < at + 4; ++i)
+        {
+            char c = s[i]; v <<= 4;
+            if (c >= '0' && c <= '9') v |= c - '0'; else if (c >= 'a' && c <= 'f') v |= c - 'a' + 10; else if (c >= 'A' && c <= 'F') v |= c - 'A' + 10; else return false;
+        }
+        return true;
+    };
+    for (size_t i = 0; i < s.size(); ++i)
+    {
+        if (s[i] != '\\' || i + 1 >= s.size()) { out += s[i]; continue; }
+        char e = s[++i];
+        switch (e)
+        {
+            case '"': out += '"'; break;   case '\\': out += '\\'; break;   case '/': out += '/'; break;
+            case 'b': out += '\b'; break;  case 'f': out += '\f'; break;    case 'n': out += '\n'; break;
+            case 'r': out += '\r'; break;  case 't': out += '\t'; break;
+            case 'u':
+            {
+                unsigned cp;
+                if (! hex4 (i + 1, cp)) { out += "\\u"; break; }
+                i += 4;
+                if (cp >= 0xD800 && cp <= 0xDBFF && i + 6 < s.size() && s[i + 1] == '\\' && s[i + 2] == 'u')
+                {
+                    unsigned lo;
+                    if (hex4 (i + 3, lo) && lo >= 0xDC00 && lo <= 0xDFFF) { cp = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00); i += 6; }
+                }
+                putUtf8 (cp);
+                break;
+            }
+            default: out += '\\'; out += e; break;
+        }
+    }
+    return out;
+}
+
 inline std::string parseJsonString (const std::string& json, const std::string& key)
 {
     std::string searchKey = "\"" + key + "\"";
@@ -44,9 +94,10 @@ inline std::string parseJsonString (const std::string& json, const std::string& 
     if (pos == std::string::npos) return "";
     pos = json.find ('"', pos + 1);
     if (pos == std::string::npos) return "";
-    auto end = json.find ('"', pos + 1);
-    if (end == std::string::npos) return "";
-    return json.substr (pos + 1, end - pos - 1);
+    auto end = pos + 1;
+    while (end < json.size() && json[end] != '"') { if (json[end] == '\\') ++end; ++end; }
+    if (end >= json.size()) return "";
+    return jsonUnescape (json.substr (pos + 1, end - pos - 1));
 }
 
 inline double parseJsonDouble (const std::string& json, const std::string& key, double def = 0.0)

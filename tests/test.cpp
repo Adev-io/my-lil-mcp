@@ -26,6 +26,10 @@ void testJson()
     check (jsonNum (-9.0309) == "-9.031", "jsonNum three decimals");
     check (parseJsonString ("{\"name\": \"VCO\"}", "name") == "VCO", "parseJsonString");
     check (parseJsonString ("{}", "name") == "", "parseJsonString missing -> empty");
+    check (parseJsonString ("{\"p\": \"C:\\\\Users\\\\a\\\\x.vcv\"}", "p") == "C:\\Users\\a\\x.vcv", "parseJsonString unescapes backslashes");
+    check (parseJsonString ("{\"s\": \"say \\\"hi\\\"\"}", "s") == "say \"hi\"", "parseJsonString keeps an escaped quote inside");
+    check (parseJsonString ("{\"s\": \"caf\\u00e9\"}", "s") == "caf\xc3\xa9", "parseJsonString decodes \\u00e9 to UTF-8");
+    check (parseJsonString ("{\"s\": \"\\ud83c\\udfb9\"}", "s") == "\xf0\x9f\x8e\xb9", "parseJsonString joins a surrogate pair");
     check (parseJsonDouble ("{\"x\": \"12.5\"}", "x") == 12.5, "parseJsonDouble accepts a quoted number");
     check (parseJsonDouble ("{}", "x", -1) == -1, "parseJsonDouble missing -> default");
     check (parseRawValue ("{\"params\": [{\"id\": 1}, {\"id\": 2}], \"k\": 1}", "params") == "[{\"id\": 1}, {\"id\": 2}]", "parseRawValue nested array");

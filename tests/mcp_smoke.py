@@ -171,8 +171,8 @@ def test_edit_tools(base, vco):
     except RuntimeError as e:
         check('model' in str(e), 'set_module_state refuses another model', str(e)[:60])
     un = call(base, 'vcvrack_find_unpatched')
-    mine = next(u for u in un if u['id'] == vco['id'])
-    check(len(mine['outputs']) >= 1 and len(mine['inputs']) >= 1, 'find_unpatched lists the VCO ports', (len(mine['inputs']), len(mine['outputs'])))
+    mine = next((u for u in un if u['id'] == vco['id']), None)
+    check(mine is not None and len(mine['outputs']) >= 1 and len(mine['inputs']) >= 1, 'find_unpatched lists the VCO ports', (len(mine['inputs']), len(mine['outputs'])) if mine else 'VCO missing')
     path = os.path.join(tempfile.gettempdir(), 'my-lil-mcp-smoke.vcv')
     if os.path.exists(path):
         os.remove(path)
