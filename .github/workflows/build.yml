@@ -1,0 +1,44 @@
+# Builds the plugin for Linux and Mac (Intel + Apple Silicon) with the official Rack SDK, and runs the core tests
+# where the CPU matches. Windows is built locally (MSYS2). The .vcvplugin files are kept as run artifacts.
+name: Build
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+env:
+  RACK_SDK_VERSION: 2.6.6
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: lin-x64, os: ubuntu-latest, sdk: lin-x64, cross: '' }
+          - { name: mac-arm64, os: macos-latest, sdk: mac-arm64, cross: '' }
+          - { name: mac-x64, os: macos-latest, sdk: mac-x64, cross: x86_64-apple-darwin }   # cross-built on the Apple Silicon runner
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Rack SDK
+        run: |
+          curl -fsSLo sdk.zip "https://vcvrack.com/downloads/Rack-SDK-${RACK_SDK_VERSION}-${{ matrix.sdk }}.zip"
+          unzip -q sdk.zip -d "$HOME" && rm sdk.zip
+          echo "RACK_DIR=$HOME/Rack-SDK" >> "$GITHUB_ENV"
+      - name: Tools
+        if: runner.os == 'macOS'
+        run: for t in jq zstd; do command -v $t >/dev/null || brew install $t; done
+      - name: Core tests
+        if: matrix.cross == ''
+        run: make test
+      - name: Build
+        run: make dist ${{ matrix.cross != '' && format('CROSS_COMPILE={0}', matrix.cross) || '' }}
+      - uses: actions/upload-artifact@v7
+        with:
+          name: MyLilMcp-${{ matrix.name }}
+          path: dist/*.vcvplugin

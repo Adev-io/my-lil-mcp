@@ -1,0 +1,15 @@
+{
+  "version": "2.6.6",
+  "modules": [
+    {
+      "id": 1,
+      "plugin": "MyLilMcp",
+      "model": "Mcp",
+      "version": "2.0.0",
+      "params": [{"value": 2601.0, "id": 0}, {"value": 1.0, "id": 1}],
+      "data": {"enabled": true, "layout_matrix_cols_hp": 0, "layout_matrix_rows": 0},
+      "pos": [0, 0]
+    }
+  ],
+  "cables": []
+}
