@@ -1,0 +1,24 @@
+{
+  "slug": "MyLilMcp",
+  "name": "My lil MCP",
+  "version": "2.0.0",
+  "license": "MIT",
+  "brand": "My lil",
+  "author": "A_Development",
+  "authorEmail": "",
+  "authorUrl": "https://github.com/Adev-io",
+  "pluginUrl": "https://github.com/Adev-io/my-lil-mcp",
+  "manualUrl": "https://github.com/Adev-io/my-lil-mcp#readme",
+  "sourceUrl": "https://github.com/Adev-io/my-lil-mcp",
+  "donateUrl": "",
+  "changelogUrl": "https://github.com/Adev-io/my-lil-mcp/releases",
+  "minRackVersion": "2.0.0",
+  "modules": [
+    {
+      "slug": "Mcp",
+      "name": "My lil MCP",
+      "description": "Local MCP server (127.0.0.1 only) so a coding agent can read, patch, undo, measure and save the running patch.",
+      "tags": ["Utility", "External"]
+    }
+  ]
+}
