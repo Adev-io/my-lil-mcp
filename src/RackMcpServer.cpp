@@ -13,11 +13,13 @@
 #include <app/RackWidget.hpp>
 #include <app/ModuleWidget.hpp>
 #include <tag.hpp>
+#include <patch.hpp>
 #include "Json.h"
 #include "Guard.h"
 
 #include <sstream>
 #include <cstring>
+#include <cstdlib>
 #include <cmath>
 #include <functional>
 #include <set>
@@ -132,6 +134,7 @@ static std::string serializeModuleDetail(engine::Module* mod) {
         s += jsonKV("y", std::to_string(mw->box.pos.y));
         s += jsonKV("width", std::to_string(mw->box.size.x));
     }
+    s += jsonKV("bypassed", mod->isBypassed() ? "true" : "false");
     s += jsonStr("params") + ": [";
     for (int i = 0; i < (int)mod->params.size(); i++) {
         s += serializeParamQuantity(mod->paramQuantities[i], i);
@@ -159,6 +162,7 @@ static std::string serializeModuleSummary(engine::Module* mod) {
         s += jsonKVs("plugin", mod->model->plugin ? mod->model->plugin->slug : "");
         s += jsonKVs("slug", mod->model->slug);
         s += jsonKVs("name", mod->model->name);
+        s += jsonKV("bypassed", mod->isBypassed() ? "true" : "false");
         s += jsonKV("params", std::to_string(mod->params.size()));
         s += jsonKV("inputs", std::to_string(mod->inputs.size()));
         s += jsonKV("outputs", std::to_string(mod->outputs.size()));
@@ -305,7 +309,13 @@ static const char* MCP_TOOLS_JSON = R"json([
 {"name":"vcvrack_search_library","description":"Search the installed plugin library for modules. Two modes:\n1. Single search: pass 'q' and/or 'tags'.\n2. Multi-search: pass 'queries' array to find needed module groups in ONE call (each keyed by its 'label' in the response). Always prefer multi-search when building a patch.\n\nIMPORTANT: 'tags' must use real VCV Rack Browser tag names (not module-type shorthand). Common valid tags: 'Oscillator', 'Filter', 'Amplifier', 'Envelope Generator', 'LFO', 'Sequencer', 'Mixer', 'Effect', 'Utility'. For example, use 'Filter' instead of 'VCF', and 'Amplifier' instead of 'VCA'.","inputSchema":{"type":"object","properties":{"q":{"type":"string","description":"Search query matching slug, name, or description (single search)"},"tags":{"type":"string","description":"Tag filter using VCV Rack tag names, e.g. 'Oscillator', 'Filter', 'Amplifier', 'Envelope Generator', 'LFO', 'Mixer' (single search). Avoid shorthand like 'VCF'/'VCA'."},"queries":{"type":"array","description":"Multi-search: array of independent queries returned grouped by label. Use to find all needed module types in one call.","items":{"type":"object","properties":{"label":{"type":"string","description":"Key for these results in the response e.g. 'osc', 'filter', 'amp'"},"q":{"type":"string","description":"Search query"},"tags":{"type":"string","description":"Tag filter using VCV Rack tag names, e.g. 'Oscillator', 'Filter', 'Amplifier'"}},"required":["label"]}}},"required":[]}},
 {"name":"vcvrack_get_plugin","description":"Get detailed information about an installed plugin and its full module list.","inputSchema":{"type":"object","properties":{"plugin_slug":{"type":"string","description":"Plugin slug"}},"required":["plugin_slug"]}},
 {"name":"vcvrack_undo","description":"Undo the most recent action in Rack's history (yours or the user's). Every edit this server makes is undoable: add/delete module, add/delete cable, set params, bypass, move, set module state. Returns the name of the action undone.","inputSchema":{"type":"object","properties":{}}},
-{"name":"vcvrack_redo","description":"Redo the most recently undone action. Returns the name of the action redone.","inputSchema":{"type":"object","properties":{}}}
+{"name":"vcvrack_redo","description":"Redo the most recently undone action. Returns the name of the action redone.","inputSchema":{"type":"object","properties":{}}},
+{"name":"vcvrack_save_patch","description":"Save the patch. With no path, saves to the patch's current file (fails if it was never saved). With a path, writes a copy there (.vcv) and leaves the current file as is. Returns path and bytes.","inputSchema":{"type":"object","properties":{"path":{"type":"string","description":"Absolute path ending in .vcv (optional)"}}}},
+{"name":"vcvrack_bypass_module","description":"Bypass or un-bypass a module (A/B a module without deleting it). Undoable.","inputSchema":{"type":"object","properties":{"id":{"type":"integer"},"bypassed":{"type":"boolean"}},"required":["id","bypassed"]}},
+{"name":"vcvrack_move_module","description":"Move a module to x/y in rack pixels (15 px per HP, 380 px per row); neighbours are pushed aside. Returns the final position. Undoable.","inputSchema":{"type":"object","properties":{"id":{"type":"integer"},"x":{"type":"number"},"y":{"type":"number"}},"required":["id","x","y"]}},
+{"name":"vcvrack_get_module_state","description":"The module's full state as Rack's own JSON (params and internal data). Keep it to restore later with vcvrack_set_module_state, e.g. before experimenting with a sound.","inputSchema":{"type":"object","properties":{"id":{"type":"integer"}},"required":["id"]}},
+{"name":"vcvrack_set_module_state","description":"Restore a module's state from JSON returned by vcvrack_get_module_state (same model only). Undoable.","inputSchema":{"type":"object","properties":{"id":{"type":"integer"},"state":{"type":"object"}},"required":["id","state"]}},
+{"name":"vcvrack_find_unpatched","description":"For every module, the inputs and outputs with no cable. Use it to spot a voice that never reaches the output or a modulation input left empty.","inputSchema":{"type":"object","properties":{}}}
 ])json";
 
 // ─── MCP prompts ────────────────────────────────────────────────────────────
@@ -1072,6 +1082,137 @@ std::string RackHttpServer::dispatchTool(const std::string& name, const std::str
             if (refused) return toolFail("That step would remove the My lil MCP module itself; do it with Ctrl+Z in Rack instead.");
             if (!did) return toolFail(redo ? "Nothing to redo" : "Nothing to undo");
             return toolOk("{\"action\":" + jsonStr(done) + "}");
+        }
+
+        if (name == "vcvrack_save_patch") {
+            std::string path = parseJsonString(args, "path");
+            std::string finalPath, why; bool saved = false; double bytes = 0;
+            if (!taskQueue->postSync([rackApp, path, &finalPath, &why, &saved, &bytes]() {
+                patch::Manager* pm = rackApp->patch;
+                std::string p = path.empty() ? pm->path : path;
+                if (p.empty()) { why = "This patch has never been saved. Pass a path (.vcv)."; return; }
+                pm->save(p);
+                if (p == pm->path) rackApp->history->setSaved();
+                finalPath = p;
+                bytes = (double)system::getFileSize(p);
+                saved = true;
+            }, "save_patch")) return toolFail("UI thread not responding (timed out)");
+            if (!saved) return toolFail(why);
+            return toolOk("{" + jsonKVs("path", finalPath) + jsonKV("bytes", std::to_string((long long)bytes), true) + "}");
+        }
+
+        if (name == "vcvrack_bypass_module") {
+            int64_t id = (int64_t)parseJsonDouble(args, "id", -1);
+            std::string raw = parseRawValue(args, "bypassed");
+            const bool bypassed = (raw == "true" || raw == "1");
+            bool found = false;
+            if (!taskQueue->postSync([rackApp, id, bypassed, &found]() {
+                app::ModuleWidget* mw = rackApp->scene->rack->getModule(id);
+                if (!mw) return;
+                found = true;
+                mw->bypassAction(bypassed);   // Rack's own action: pushes history
+            }, "bypass_module/" + std::to_string(id))) return toolFail("UI thread not responding (timed out)");
+            if (!found) return toolFail("Module not found: " + std::to_string(id));
+            return toolOk("{\"id\":" + std::to_string(id) + ",\"bypassed\":" + (bypassed ? "true" : "false") + "}");
+        }
+
+        if (name == "vcvrack_move_module") {
+            int64_t id = (int64_t)parseJsonDouble(args, "id", -1);
+            float x = (float)parseJsonDouble(args, "x", -1.0), y = (float)parseJsonDouble(args, "y", -1.0);
+            if (x < 0.f || y < 0.f) return toolFail("x and y (pixels) are required");
+            bool found = false; float fx = 0.f, fy = 0.f;
+            if (!taskQueue->postSync([rackApp, id, x, y, &found, &fx, &fy]() {
+                app::ModuleWidget* mw = rackApp->scene->rack->getModule(id);
+                if (!mw) return;
+                found = true;
+                history::ModuleMove* h = new history::ModuleMove;
+                h->name = "MCP move module";
+                h->moduleId = id;
+                h->oldPos = mw->box.pos;
+                rackApp->scene->rack->setModulePosForce(mw, math::Vec(x, y));
+                h->newPos = mw->box.pos;
+                rackApp->history->push(h);
+                fx = mw->box.pos.x; fy = mw->box.pos.y;
+            }, "move_module/" + std::to_string(id))) return toolFail("UI thread not responding (timed out)");
+            if (!found) return toolFail("Module not found: " + std::to_string(id));
+            return toolOk("{\"id\":" + std::to_string(id) + ",\"x\":" + std::to_string((int)fx) + ",\"y\":" + std::to_string((int)fy) + "}");
+        }
+
+        if (name == "vcvrack_get_module_state") {
+            int64_t id = (int64_t)parseJsonDouble(args, "id", -1);
+            std::string body;
+            if (!taskQueue->postSync([rackApp, id, &body]() {
+                engine::Module* mod = rackApp->engine->getModule(id);
+                if (!mod) return;
+                json_t* j = rackApp->engine->moduleToJson(mod);   // locks against process()
+                char* s = json_dumps(j, JSON_COMPACT);
+                body = s ? s : "{}";
+                free(s);
+                json_decref(j);
+            }, "get_module_state/" + std::to_string(id))) return toolFail("UI thread not responding (timed out)");
+            if (body.empty()) return toolFail("Module not found: " + std::to_string(id));
+            return toolOk(body);
+        }
+
+        if (name == "vcvrack_set_module_state") {
+            int64_t id = (int64_t)parseJsonDouble(args, "id", -1);
+            std::string state = parseRawValue(args, "state");
+            json_error_t jerr;
+            json_t* newJ = state.empty() ? nullptr : json_loads(state.c_str(), 0, &jerr);
+            if (!newJ) return toolFail("state must be a JSON object as returned by vcvrack_get_module_state");
+            std::string why; bool done = false;
+            if (!taskQueue->postSync([rackApp, id, newJ, &why, &done]() {
+                engine::Module* mod = rackApp->engine->getModule(id);
+                if (!mod) { why = "Module not found: " + std::to_string(id); return; }
+                json_t* modelJ = json_object_get(newJ, "model");
+                if (modelJ && mod->model && mod->model->slug != json_string_value(modelJ)) {
+                    why = "state is for model " + std::string(json_string_value(modelJ)) + ", this module is " + mod->model->slug;
+                    return;
+                }
+                history::ModuleChange* h = new history::ModuleChange;
+                h->name = "MCP set module state";
+                h->moduleId = id;
+                h->oldModuleJ = rackApp->engine->moduleToJson(mod);   // engine-locked, as Rack's own undo does
+                rackApp->engine->moduleFromJson(mod, newJ);
+                h->newModuleJ = rackApp->engine->moduleToJson(mod);
+                rackApp->history->push(h);
+                done = true;
+            }, "set_module_state/" + std::to_string(id))) { json_decref(newJ); return toolFail("UI thread not responding (timed out)"); }
+            json_decref(newJ);
+            if (!done) return toolFail(why);
+            return toolOk("{\"id\":" + std::to_string(id) + ",\"applied\":true}");
+        }
+
+        if (name == "vcvrack_find_unpatched") {
+            std::string body;
+            if (!taskQueue->postSync([rackApp, &body]() {
+                body = "[";
+                bool first = true;
+                for (int64_t id : rackApp->engine->getModuleIds()) {
+                    engine::Module* mod = rackApp->engine->getModule(id);
+                    if (!mod) continue;
+                    std::string ins = "[", outs = "[";
+                    bool fi = true, fo = true;
+                    for (int i = 0; i < (int)mod->inputs.size(); i++) {
+                        if (mod->inputs[i].isConnected()) continue;
+                        PortInfo* pi = i < (int)mod->inputInfos.size() ? mod->inputInfos[i] : nullptr;
+                        ins += std::string(fi ? "" : ",") + "{\"id\":" + std::to_string(i) + ",\"name\":" + jsonStr(pi ? pi->name : "") + "}";
+                        fi = false;
+                    }
+                    for (int i = 0; i < (int)mod->outputs.size(); i++) {
+                        if (mod->outputs[i].isConnected()) continue;
+                        PortInfo* pi = i < (int)mod->outputInfos.size() ? mod->outputInfos[i] : nullptr;
+                        outs += std::string(fo ? "" : ",") + "{\"id\":" + std::to_string(i) + ",\"name\":" + jsonStr(pi ? pi->name : "") + "}";
+                        fo = false;
+                    }
+                    if (!first) body += ",";
+                    first = false;
+                    body += "{" + jsonKV("id", std::to_string(id)) + jsonKVs("name", mod->model ? mod->model->name : "")
+                          + jsonKV("inputs", ins + "]") + jsonKV("outputs", outs + "]", true) + "}";
+                }
+                body += "]";
+            }, "find_unpatched")) return toolFail("UI thread not responding (timed out)");
+            return toolOk(body);
         }
 
         return toolFail("Unknown tool: " + name);

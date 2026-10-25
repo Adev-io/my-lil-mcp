@@ -13,7 +13,9 @@ import urllib.request
 EXPECTED_TOOLS = ['vcvrack_get_status', 'vcvrack_list_modules', 'vcvrack_get_module', 'vcvrack_add_module',
                   'vcvrack_delete_module', 'vcvrack_get_params', 'vcvrack_set_params', 'vcvrack_list_cables',
                   'vcvrack_add_cable', 'vcvrack_delete_cable', 'vcvrack_search_library', 'vcvrack_get_rack_layout',
-                  'vcvrack_undo', 'vcvrack_redo']
+                  'vcvrack_undo', 'vcvrack_redo', 'vcvrack_save_patch', 'vcvrack_bypass_module',
+                  'vcvrack_move_module', 'vcvrack_get_module_state', 'vcvrack_set_module_state',
+                  'vcvrack_find_unpatched']
 fails = 0
 
 
@@ -142,6 +144,44 @@ def test_undo_redo(base, vco):
 
 
 STEPS.append(test_undo_redo)
+
+
+def test_edit_tools(base, vco):
+    import os, tempfile
+    r = call(base, 'vcvrack_bypass_module', {'id': vco['id'], 'bypassed': True})
+    check(call(base, 'vcvrack_get_module', {'module_id': vco['id']})['bypassed'] is True, 'bypass_module on')
+    call(base, 'vcvrack_undo')
+    check(call(base, 'vcvrack_get_module', {'module_id': vco['id']})['bypassed'] is False, 'undo un-bypasses')
+    m = call(base, 'vcvrack_get_module', {'module_id': vco['id']})
+    r = call(base, 'vcvrack_move_module', {'id': vco['id'], 'x': m['x'] + 300, 'y': m['y']})
+    check(abs(r['x'] - (m['x'] + 300)) < 1 and abs(r['y'] - m['y']) < 1, 'move_module', (r['x'], r['y']))
+    call(base, 'vcvrack_undo')
+    check(abs(call(base, 'vcvrack_get_module', {'module_id': vco['id']})['x'] - m['x']) < 1, 'undo moves it back')
+    state = call(base, 'vcvrack_get_module_state', {'id': vco['id']})
+    check(state['model'] == vco['slug'] and 'params' in state, 'get_module_state is the module JSON')
+    params = call(base, 'vcvrack_get_params', {'moduleId': vco['id']})
+    freq = next(p for p in params if p['name'].lower().startswith('freq'))
+    call(base, 'vcvrack_set_params', {'moduleId': vco['id'], 'params': [{'id': freq['id'], 'value': freq['min']}]})
+    call(base, 'vcvrack_set_module_state', {'id': vco['id'], 'state': state})
+    now = next(p for p in call(base, 'vcvrack_get_params', {'moduleId': vco['id']}) if p['id'] == freq['id'])
+    check(abs(now['value'] - freq['value']) < 1e-4, 'set_module_state restores the params', now['value'])
+    try:
+        call(base, 'vcvrack_set_module_state', {'id': vco['id'], 'state': {'model': 'NotThisOne', 'params': []}})
+        check(False, 'set_module_state refuses another model')
+    except RuntimeError as e:
+        check('model' in str(e), 'set_module_state refuses another model', str(e)[:60])
+    un = call(base, 'vcvrack_find_unpatched')
+    mine = next(u for u in un if u['id'] == vco['id'])
+    check(len(mine['outputs']) >= 1 and len(mine['inputs']) >= 1, 'find_unpatched lists the VCO ports', (len(mine['inputs']), len(mine['outputs'])))
+    path = os.path.join(tempfile.gettempdir(), 'my-lil-mcp-smoke.vcv')
+    if os.path.exists(path):
+        os.remove(path)
+    r = call(base, 'vcvrack_save_patch', {'path': path})
+    check(os.path.exists(path) and os.path.getsize(path) > 100 and r['bytes'] == os.path.getsize(path), 'save_patch writes the file', r['bytes'])
+    os.remove(path)
+
+
+STEPS.append(test_edit_tools)
 
 if __name__ == '__main__':
     main()
