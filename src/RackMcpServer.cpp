@@ -286,7 +286,7 @@ static bool isWithinColBounds(float x, float width, float mcpX, const LayoutPref
 // ─── MCP tools list (JSON Schema for each tool) ────────────────────────────
 
 static const char* MCP_TOOLS_JSON = R"json([
-{"name":"vcvrack_get_status","description":"Get VCV Rack server status: version, sample rate, and loaded module count.","inputSchema":{"type":"object","properties":{}}},
+{"name":"vcvrack_get_status","description":"Get server status: version, sample rate, loaded module count, and engineLoad (0..1 share of the audio block spent processing).","inputSchema":{"type":"object","properties":{}}},
 {"name":"vcvrack_get_mcp_position","description":"Get the MCP Server module's root position in rack pixel coordinates. Use this as the starting anchor before placing related modules.","inputSchema":{"type":"object","properties":{}}},
 {"name":"vcvrack_get_layout_preferences","description":"Get user matrix preferences anchored at the MCP module. matrix_cols_hp is width in HP (15 px/HP) from MCP x, matrix_rows is row count starting at MCP row. 0 means unbounded.","inputSchema":{"type":"object","properties":{}}},
 {"name":"vcvrack_set_layout_preferences","description":"Set user matrix preferences anchored at the MCP module. matrix_cols_hp is width in HP (15 px/HP) from MCP x, matrix_rows is row count starting at MCP row. Set either to 0 for unbounded.","inputSchema":{"type":"object","properties":{"matrix_cols_hp":{"type":"integer","minimum":0},"matrix_rows":{"type":"integer","minimum":0}},"required":["matrix_cols_hp","matrix_rows"]}},
@@ -518,60 +518,6 @@ void RackMcpServer::dataFromJson(json_t* rootJ) {
 
 RackHttpServer::~RackHttpServer() { stop(); }
 
-rack::math::Vec RackHttpServer::computeAutoPosition(int64_t nearModuleId, float moduleWidth) {
-    if (!rackApp || !rackApp->scene || !rackApp->scene->rack) return math::Vec(0, 0);
-    app::RackWidget* rw = rackApp->scene->rack;
-
-    app::ModuleWidget* bridge = parent ? rw->getModule(parent->id) : nullptr;
-    float anchorX = bridge ? bridge->box.pos.x : 0.f;
-    float anchorY = bridge ? bridge->box.pos.y : 0.f;
-    int mcpRowIdx = roundRowIndex(anchorY);
-    LayoutPrefs prefs = readLayoutPrefs(parent);
-
-    auto valid = [&](float x, float y) {
-        int rowIdx = roundRowIndex(y);
-        return isWithinRowBounds(rowIdx, mcpRowIdx, prefs)
-            && isWithinColBounds(x, moduleWidth, anchorX, prefs);
-    };
-
-    if (nearModuleId >= 0) {
-        app::ModuleWidget* fw = rw->getModule(nearModuleId);
-        if (fw) {
-            math::Vec nearPos = math::Vec(fw->box.pos.x + fw->box.size.x, fw->box.pos.y);
-            if (valid(nearPos.x, nearPos.y)) return nearPos;
-        }
-    }
-
-    std::map<int, float> rowRight;
-    for (app::ModuleWidget* w : rw->getModules()) {
-        if (bridge && w == bridge) continue;
-        int rowIdx = roundRowIndex(w->box.pos.y);
-        if (!isWithinRowBounds(rowIdx, mcpRowIdx, prefs)) continue;
-        float right = w->box.pos.x + w->box.size.x;
-        rowRight[rowIdx] = std::max(rowRight[rowIdx], right);
-    }
-
-    int maxKnownRowIdx = mcpRowIdx;
-    for (const auto& [rowIdx, _] : rowRight) {
-        maxKnownRowIdx = std::max(maxKnownRowIdx, rowIdx);
-    }
-    int maxRowIdx = (prefs.rows > 0) ? (mcpRowIdx + prefs.rows - 1) : (maxKnownRowIdx + 1);
-    for (int rowIdx = mcpRowIdx; rowIdx <= maxRowIdx; ++rowIdx) {
-        float candidateX = anchorX;
-        auto it = rowRight.find(rowIdx);
-        if (it != rowRight.end()) {
-            candidateX = std::max(anchorX, it->second);
-        }
-        float candidateY = (float)alignedRowY(rowIdx);
-        if (valid(candidateX, candidateY)) {
-            return math::Vec(candidateX, candidateY);
-        }
-    }
-
-    // Signal exhaustion with a negative position.
-    return math::Vec(-1.f, -1.f);
-}
-
 std::string RackHttpServer::getLayoutPrefsJson() {
     LayoutPrefs prefs = readLayoutPrefs(parent);
     return "{"
@@ -689,15 +635,17 @@ std::string RackHttpServer::dispatchTool(const std::string& name, const std::str
         auto* rackApp = this->rackApp;
 
         if (name == "vcvrack_get_status") {
-            float sr = 0.f; int count = 0;
-            if (!taskQueue->postSync([rackApp, &sr, &count]() {
+            float sr = 0.f; int count = 0; double cpu = 0.0;
+            if (!taskQueue->postSync([rackApp, &sr, &count, &cpu]() {
                 if (!rackApp || !rackApp->engine) return;
                 sr = rackApp->engine->getSampleRate();
                 count = (int)rackApp->engine->getModuleIds().size();
+                cpu = rackApp->engine->getMeterAverage();
             }, "get_status")) return toolFail("UI thread not responding (timed out)");
             return toolOk("{\"server\":\"My lil MCP\",\"version\":\"2.0.0\","
                           "\"sampleRate\":" + std::to_string(sr) +
-                          ",\"moduleCount\":" + std::to_string(count) + "}");
+                          ",\"moduleCount\":" + std::to_string(count) +
+                          ",\"engineLoad\":" + jsonNum(cpu) + "}");
         }
 
         if (name == "vcvrack_get_mcp_position") {
@@ -1147,7 +1095,7 @@ void RackHttpServer::handleMcpPost(const httplib::Request& req, httplib::Respons
 
 void RackHttpServer::setupRoutes() {
         rackApp = APP;
-        auto* rackApp = this->rackApp; // local alias for lambda captures
+        auto* rackApp = this->rackApp;
         svr.set_pre_routing_handler([](const httplib::Request& req, httplib::Response& res) {
             if (!guard::isLoopbackHost(req.get_header_value("Host"))) {
                 res.status = 403;
@@ -1170,376 +1118,32 @@ void RackHttpServer::setupRoutes() {
         });
         svr.Options(".*", [](const httplib::Request&, httplib::Response& res) { res.status = 204; });
 
+        // Health check for scripts and humans. Everything else goes through /mcp.
         svr.Get("/status", [rackApp, this](const httplib::Request&, httplib::Response& res) {
             if (!rackApp || !rackApp->engine) { res.status = 503; res.set_content(err("Engine not available"), "application/json"); return; }
-            float sr = 0.f; int count = 0;
-            if (!taskQueue->postSync([rackApp, &sr, &count]() {
+            float sr = 0.f; int count = 0; double cpu = 0.0;
+            if (!taskQueue->postSync([rackApp, &sr, &count, &cpu]() {
                 if (!rackApp->engine) return;
                 sr = rackApp->engine->getSampleRate();
                 count = (int)rackApp->engine->getModuleIds().size();
+                cpu = rackApp->engine->getMeterAverage();
             })) { res.status = 503; res.set_content(err("UI thread not responding (timed out)"), "application/json"); return; }
             std::string body = "{" + jsonKVs("server", "My lil MCP") + jsonKVs("version", "2.0.0") +
                 jsonKVs("build", std::string(__DATE__) + " " + __TIME__) +
-                jsonKV("sampleRate", std::to_string(sr)) + jsonKV("moduleCount", std::to_string(count), true) + "}";
+                jsonKV("sampleRate", std::to_string(sr)) + jsonKV("moduleCount", std::to_string(count)) +
+                jsonKV("engineLoad", jsonNum(cpu), true) + "}";
             res.set_content(ok(body), "application/json");
         });
 
-        svr.Get("/mcp-module/position", [rackApp, this](const httplib::Request&, httplib::Response& res) {
-            if (!rackApp || !rackApp->engine) { res.status = 503; res.set_content(err("Engine not available"), "application/json"); return; }
-            std::string body;
-            int64_t mcpId = parent ? parent->id : -1;
-            if (!taskQueue->postSync([rackApp, &body, mcpId]() {
-                body = getMcpModulePositionJson(rackApp && rackApp->scene ? rackApp->scene->rack : nullptr, mcpId);
-            })) { res.status = 503; res.set_content(err("UI thread not responding (timed out)"), "application/json"); return; }
-            res.set_content(ok(body), "application/json");
-        });
-
-        svr.Get("/layout/preferences", [this](const httplib::Request&, httplib::Response& res) {
-            res.set_content(ok(getLayoutPrefsJson()), "application/json");
-        });
-
-        svr.Post("/layout/preferences", [this](const httplib::Request& req, httplib::Response& res) {
-            int colsHp = (int)parseJsonDouble(req.body, "matrix_cols_hp", -1);
-            int rows = (int)parseJsonDouble(req.body, "matrix_rows", -1);
-            if (colsHp < 0 || rows < 0) {
-                res.status = 400;
-                res.set_content(err("matrix_cols_hp and matrix_rows are required and must be >= 0"), "application/json");
-                return;
-            }
-            if (parent) {
-                std::lock_guard<std::mutex> lock(parent->layoutPrefsMutex);
-                parent->layoutMatrixColsHp = colsHp;
-                parent->layoutMatrixRows = rows;
-            }
-            res.set_content(ok(getLayoutPrefsJson()), "application/json");
-        });
-
-        svr.Get("/modules", [rackApp, this](const httplib::Request&, httplib::Response& res) {
-            if (!rackApp || !rackApp->engine) { res.status = 503; res.set_content(err("Engine not available"), "application/json"); return; }
-            std::string body;
-            if (!taskQueue->postSync([rackApp, &body]() {
-                if (!rackApp->engine) { body = "[]"; return; }
-                std::vector<int64_t> ids = rackApp->engine->getModuleIds();
-                body = "[";
-                for (size_t i = 0; i < ids.size(); i++) {
-                    engine::Module* mod = rackApp->engine->getModule(ids[i]);
-                    body += (mod ? serializeModuleSummary(mod) : "null") + (i < ids.size() - 1 ? ", " : "");
-                }
-                body += "]";
-            })) { res.status = 503; res.set_content(err("UI thread not responding (timed out)"), "application/json"); return; }
-            res.set_content(ok(body), "application/json");
-        });
-
-        svr.Get("/rack/layout", [rackApp, this](const httplib::Request&, httplib::Response& res) {
-            if (!rackApp || !rackApp->engine) { res.status = 503; res.set_content(err("Engine not available"), "application/json"); return; }
-
-            std::map<int, RowInfo> rows;
-            std::map<int, float> rowTerminalOutputX;
-            float mcpX = 0.f, mcpY = 0.f;
-            LayoutPrefs prefs = readLayoutPrefs(parent);
-            int64_t mcpId = parent ? parent->id : -1;
-
-            if (!taskQueue->postSync([rackApp, &rows, &rowTerminalOutputX, &mcpX, &mcpY, mcpId]() {
-                for (int64_t id : rackApp->engine->getModuleIds()) {
-                    app::ModuleWidget* mw = rackApp->scene->rack->getModule(id);
-                    if (!mw) continue;
-                    if (id == mcpId) { mcpX = mw->box.pos.x; mcpY = mw->box.pos.y; }
-                    int rowIdx = (int)std::round(mw->box.pos.y / RACK_GRID_HEIGHT);
-                    float rowY  = rowIdx * RACK_GRID_HEIGHT;
-                    float right = mw->box.pos.x + mw->box.size.x;
-                    if (isTerminalOutputModule(mw)) {
-                        auto outIt = rowTerminalOutputX.find(rowIdx);
-                        if (outIt == rowTerminalOutputX.end() || mw->box.pos.x < outIt->second) {
-                            rowTerminalOutputX[rowIdx] = mw->box.pos.x;
-                        }
-                    }
-                    auto it = rows.find(rowIdx);
-                    if (it == rows.end()) {
-                        rows[rowIdx] = {rowY, mw->box.pos.x, right, 1};
-                    } else {
-                        it->second.left  = std::min(it->second.left,  mw->box.pos.x);
-                        it->second.right = std::max(it->second.right, right);
-                        it->second.count++;
-                    }
-                }
-            })) { res.status = 503; res.set_content(err("UI thread not responding (timed out)"), "application/json"); return; }
-
-            std::string body = buildLayoutJson(rows, rowTerminalOutputX, mcpX, mcpY, prefs);
-            res.set_content(ok(body), "application/json");
-        });
-
-        svr.Get(R"(/modules/(\d+)$)", [rackApp, this](const httplib::Request& req, httplib::Response& res) {
-            if (!rackApp || !rackApp->engine) { res.status = 503; res.set_content(err("Engine not available"), "application/json"); return; }
-            int64_t id = std::stoll(req.matches[1]);
-            std::string body;
-            if (!taskQueue->postSync([rackApp, id, &body]() {
-                if (!rackApp->engine) return;
-                engine::Module* mod = rackApp->engine->getModule(id);
-                body = mod ? serializeModuleDetail(mod) : "null";
-            })) { res.status = 503; res.set_content(err("UI thread not responding (timed out)"), "application/json"); return; }
-            if (body == "null") { res.status = 404; res.set_content(err("Module not found"), "application/json"); }
-            else res.set_content(ok(body), "application/json");
-        });
-
-        svr.Post("/modules/add", [rackApp, this](const httplib::Request& req, httplib::Response& res) {
-            if (!rackApp || !rackApp->engine || !rackApp->scene || !rackApp->scene->rack) { res.status = 503; res.set_content(err("Engine not available"), "application/json"); return; }
-            std::string pSlug = parseJsonString(req.body, "plugin"), mSlug = parseJsonString(req.body, "slug");
-            float x = (float)parseJsonDouble(req.body, "x", -1.0), y = (float)parseJsonDouble(req.body, "y", -1.0);
-            int64_t nearId = (int64_t)parseJsonDouble(req.body, "nearModuleId", -1.0);
-            plugin::Model* model = nullptr;
-            for (plugin::Plugin* p : rack::plugin::plugins) if (p->slug == pSlug) for (plugin::Model* m : p->models) if (m->slug == mSlug) { model = m; break; }
-            if (!model) { res.status = 404; res.set_content(err("Model not found"), "application/json"); return; }
-            int64_t moduleId = -1;
-            std::string failReason;
-            LayoutPrefs prefs = readLayoutPrefs(parent);
-            int64_t mcpId = parent ? parent->id : -1;
-            if (!taskQueue->postSync([this, rackApp, model, x, y, nearId, prefs, mcpId, &moduleId, &failReason]() mutable {
-                if (!rackApp->engine || !rackApp->scene || !rackApp->scene->rack) return;
-                engine::Module* m = model->createModule(); if (!m) return;
-                app::ModuleWidget* mw = model->createModuleWidget(m); if (!mw) { delete m; return; }
-                math::Vec pos;
-                if (x >= 0.f) {
-                    if (y < 0.f) { failReason = "y is required when x is provided"; mw->module = nullptr; delete mw; delete m; return; }
-                    pos = math::Vec(x, y);
-                } else {
-                    pos = computeAutoPosition(nearId, mw->box.size.x);
-                }
-                app::ModuleWidget* mcp = rackApp->scene->rack->getModule(mcpId);
-                float mcpX = mcp ? mcp->box.pos.x : 0.f;
-                int mcpRowIdx = roundRowIndex(mcp ? mcp->box.pos.y : 0.f);
-                int rowIdx = roundRowIndex(pos.y);
-                if (pos.x < 0.f || pos.y < 0.f) {
-                    failReason = "No valid matrix slot available for auto-placement";
-                    mw->module = nullptr; // detach before delete so ~ModuleWidget() doesn't call engine->removeModule on unregistered module
-                    delete mw;
-                    delete m;
-                    return;
-                }
-                if (!isWithinRowBounds(rowIdx, mcpRowIdx, prefs) || !isWithinColBounds(pos.x, mw->box.size.x, mcpX, prefs)) {
-                    failReason = "Requested placement is outside matrix preferences";
-                    mw->module = nullptr; // detach before delete so ~ModuleWidget() doesn't call engine->removeModule on unregistered module
-                    delete mw;
-                    delete m;
-                    return;
-                }
-                rackApp->engine->addModule(m); moduleId = m->id;
-                rackApp->scene->rack->addModule(mw);
-                rackApp->scene->rack->setModulePosForce(mw, pos);
-            })) { res.status = 503; res.set_content(err("UI thread not responding (timed out)"), "application/json"); return; }
-            if (moduleId < 0) {
-                res.status = 400;
-                res.set_content(err(failReason.empty() ? "Failed to create module" : failReason), "application/json");
-            }
-            else res.set_content(ok("{" + jsonKV("id", std::to_string(moduleId)) + jsonKVs("plugin", pSlug) + jsonKVs("slug", mSlug, true) + "}"), "application/json");
-        });
-
-        svr.Delete(R"(/modules/(\d+)$)", [this](const httplib::Request& req, httplib::Response& res) {
-            int64_t id = std::stoll(req.matches[1]);
-            if (parent && parent->id == id) { res.status = 403; res.set_content(err("Cannot delete server module"), "application/json"); return; }
-            if (parent) { std::lock_guard<std::mutex> lock(parent->pendingDeleteMutex); parent->pendingDeleteIds.push_back((uint64_t)id); }
-            res.set_content(ok("{\"status\":\"queued\",\"id\":" + std::to_string(id) + "}"), "application/json");
-        });
-
-        svr.Get(R"(/modules/(\d+)/params)", [rackApp, this](const httplib::Request& req, httplib::Response& res) {
-            if (!rackApp || !rackApp->engine) { res.status = 503; res.set_content(err("Engine not available"), "application/json"); return; }
-            int64_t id = std::stoll(req.matches[1]);
-            std::string body;
-            if (!taskQueue->postSync([rackApp, id, &body]() {
-                if (!rackApp->engine) return;
-                engine::Module* mod = rackApp->engine->getModule(id);
-                if (!mod) { body = "null"; return; }
-                body = "[";
-                for (int i = 0; i < (int)mod->params.size(); i++) {
-                    body += serializeParamQuantity(mod->paramQuantities[i], i) + (i < (int)mod->params.size() - 1 ? ", " : "");
-                }
-                body += "]";
-            })) { res.status = 503; res.set_content(err("UI thread not responding (timed out)"), "application/json"); return; }
-            if (body == "null") { res.status = 404; res.set_content(err("Module not found"), "application/json"); }
-            else res.set_content(ok(body), "application/json");
-        });
-
-        svr.Post(R"(/modules/(\d+)/params)", [rackApp, this](const httplib::Request& req, httplib::Response& res) {
-            if (!rackApp || !rackApp->engine) { res.status = 503; res.set_content(err("Engine not available"), "application/json"); return; }
-            int64_t id = std::stoll(req.matches[1]);
-            const std::string requestBody = req.body;
-            int applied = 0; bool found = false;
-            if (!taskQueue->postSync([rackApp, id, requestBody, &applied, &found]() {
-                engine::Module* mod = rackApp->engine->getModule(id);
-                if (!mod) return;
-                found = true;
-                size_t pos = 0;
-                while (pos < requestBody.size()) {
-                    size_t start = requestBody.find('{', pos); if (start == std::string::npos) break;
-                    size_t end = requestBody.find('}', start); if (end == std::string::npos) break;
-                    std::string obj = requestBody.substr(start, end - start + 1);
-                    int paramId = (int)parseJsonDouble(obj, "id", -1);
-                    double value = parseJsonDouble(obj, "value", 0.0);
-                    if (paramId >= 0 && paramId < (int)mod->params.size()) { rackApp->engine->setParamValue(mod, paramId, (float)value); applied++; }
-                    pos = end + 1;
-                }
-            })) { res.status = 503; res.set_content(err("UI thread not responding (timed out)"), "application/json"); return; }
-            if (!found) { res.status = 404; res.set_content(err("Module not found"), "application/json"); }
-            else res.set_content(ok("{\"applied\":" + std::to_string(applied) + "}"), "application/json");
-        });
-
-        svr.Get("/cables", [rackApp, this](const httplib::Request&, httplib::Response& res) {
-            if (!rackApp || !rackApp->engine) { res.status = 503; res.set_content(err("Engine not available"), "application/json"); return; }
-            std::string body;
-            if (!taskQueue->postSync([rackApp, &body]() {
-                if (!rackApp->engine) { body = "[]"; return; }
-                std::vector<int64_t> ids = rackApp->engine->getCableIds();
-                body = "[";
-                for (size_t i = 0; i < ids.size(); i++) {
-                    engine::Cable* c = rackApp->engine->getCable(ids[i]);
-                    if (c && c->outputModule && c->inputModule) {
-                        body += "{\"id\":" + std::to_string(c->id) + ", \"outputModuleId\":" + std::to_string(c->outputModule->id) +
-                                ", \"outputId\":" + std::to_string(c->outputId) + ", \"inputModuleId\":" + std::to_string(c->inputModule->id) +
-                                ", \"inputId\":" + std::to_string(c->inputId) + "}";
-                    } else { body += "null"; }
-                    if (i < ids.size() - 1) body += ", ";
-                }
-                body += "]";
-            })) { res.status = 503; res.set_content(err("UI thread not responding (timed out)"), "application/json"); return; }
-            res.set_content(ok(body), "application/json");
-        });
-
-        svr.Post("/cables", [rackApp, this](const httplib::Request& req, httplib::Response& res) {
-            if (!rackApp || !rackApp->engine || !rackApp->scene || !rackApp->scene->rack) { res.status = 503; res.set_content(err("Engine not available"), "application/json"); return; }
-            int64_t outM = (int64_t)parseJsonDouble(req.body, "outputModuleId", -1), inM = (int64_t)parseJsonDouble(req.body, "inputModuleId", -1);
-            int outP = (int)parseJsonDouble(req.body, "outputId", 0), inP = (int)parseJsonDouble(req.body, "inputId", 0);
-            int64_t cableId = -1;
-            
-            if (!taskQueue->postSync([rackApp, outM, outP, inM, inP, &cableId]() {
-                if (!rackApp->engine || !rackApp->scene || !rackApp->scene->rack) return;
-                engine::Module* oMod = rackApp->engine->getModule(outM);
-                engine::Module* iMod = rackApp->engine->getModule(inM);
-                if (!oMod || !iMod) return;
-
-                app::ModuleWidget* oWidget = rackApp->scene->rack->getModule(outM);
-                app::ModuleWidget* iWidget = rackApp->scene->rack->getModule(inM);
-                if (!oWidget || !iWidget) return;
-
-                app::PortWidget* oPort = oWidget->getOutput(outP);
-                app::PortWidget* iPort = iWidget->getInput(inP);
-                if (!oPort || !iPort) return;
-
-                // 1. Create engine cable
-                engine::Cable* c = new engine::Cable;
-                c->outputModule = oMod;
-                c->outputId = outP;
-                c->inputModule = iMod;
-                c->inputId = inP;
-                rackApp->engine->addCable(c);
-                cableId = c->id;
-
-                // 2. Create UI cable widget
-                app::CableWidget* cw = new app::CableWidget;
-                cw->color = rackApp->scene->rack->getNextCableColor();
-                cw->setCable(c);
-                cw->outputPort = oPort;
-                cw->inputPort = iPort;
-                rackApp->scene->rack->addCable(cw);
-            })) { res.status = 503; res.set_content(err("UI thread not responding (timed out)"), "application/json"); return; }
-
-            if (cableId < 0) { res.status = 404; res.set_content(err("Failed to connect: ports or modules not found"), "application/json"); }
-            else res.set_content(ok("{\"id\":" + std::to_string(cableId) + "}"), "application/json");
-        });
-
-        svr.Delete(R"(/cables/(\d+))", [rackApp, this](const httplib::Request& req, httplib::Response& res) {
-            if (!rackApp || !rackApp->engine || !rackApp->scene || !rackApp->scene->rack) { res.status = 503; res.set_content(err("Engine not available"), "application/json"); return; }
-            int64_t id = std::stoll(req.matches[1]);
-            bool found = false;
-
-            if (!taskQueue->postSync([rackApp, id, &found]() {
-                if (!rackApp->engine || !rackApp->scene || !rackApp->scene->rack) return;
-                app::CableWidget* cw = rackApp->scene->rack->getCable(id);
-                if (cw) {
-                    found = true;
-                    rackApp->scene->rack->removeCable(cw);
-                    delete cw;
-                } else {
-                    // Fallback: if no widget, try removing from engine
-                    engine::Cable* c = rackApp->engine->getCable(id);
-                    if (c) {
-                        found = true;
-                        rackApp->engine->removeCable(c);
-                        delete c;
-                    }
-                }
-            })) { res.status = 503; res.set_content(err("UI thread not responding (timed out)"), "application/json"); return; }
-
-            if (!found) { res.status = 404; res.set_content(err("Cable not found"), "application/json"); }
-            else res.set_content(ok("{\"removed\":true}"), "application/json");
-        });
-
-        svr.Get("/sample-rate", [rackApp, this](const httplib::Request&, httplib::Response& res) {
-            if (!rackApp || !rackApp->engine) { res.status = 503; res.set_content(err("Engine not available"), "application/json"); return; }
-            float sr = 0.f;
-            if (!taskQueue->postSync([rackApp, &sr]() { if (rackApp && rackApp->engine) sr = rackApp->engine->getSampleRate(); })) { res.status = 503; res.set_content(err("UI thread not responding (timed out)"), "application/json"); return; }
-            res.set_content(ok("{\"sampleRate\":" + std::to_string(sr) + "}"), "application/json");
-        });
-
-        svr.Get("/library", [](const httplib::Request& req, httplib::Response& res) {
-            std::string tagFilter = req.has_param("tags") ? req.get_param_value("tags") : "";
-            std::string query = req.has_param("q") ? req.get_param_value("q") : "";
-            std::string queryLow = query; std::transform(queryLow.begin(), queryLow.end(), queryLow.begin(), ::tolower);
-
-            std::string body = "[";
-            bool firstPlugin = true;
-            for (plugin::Plugin* plug : rack::plugin::plugins) {
-                std::vector<plugin::Model*> filtered;
-                for (plugin::Model* m : plug->models) {
-                    if (!tagFilter.empty()) {
-                        bool hasTag = false;
-                        for (int t : m->tagIds) {
-                            std::string tn = rack::tag::getTag(t); std::transform(tn.begin(), tn.end(), tn.begin(), ::tolower);
-                            if (tagFilter.find(tn) != std::string::npos) { hasTag = true; break; }
-                        }
-                        if (!hasTag) continue;
-                    }
-                    if (!queryLow.empty()) {
-                        std::string s = m->slug + " " + m->name + " " + m->description; std::transform(s.begin(), s.end(), s.begin(), ::tolower);
-                        if (s.find(queryLow) == std::string::npos) continue;
-                    }
-                    filtered.push_back(m);
-                }
-                if (filtered.empty()) continue;
-                if (!firstPlugin) body += ", ";
-                firstPlugin = false;
-                body += "{\"slug\":" + jsonStr(plug->slug) + ", \"name\":" + jsonStr(plug->name) + ", \"modules\": [";
-                for (size_t i = 0; i < filtered.size(); i++) {
-                    body += serializeModel(filtered[i]) + (i < filtered.size() - 1 ? ", " : "");
-                }
-                body += "]}";
-            }
-            body += "]";
-            res.set_content(ok(body), "application/json");
-        });
-
-        svr.Get(R"(/library/([^/]+))", [](const httplib::Request& req, httplib::Response& res) {
-            std::string slug = req.matches[1];
-            for (plugin::Plugin* p : rack::plugin::plugins) {
-                if (p->slug == slug) { res.set_content(ok(serializePlugin(p)), "application/json"); return; }
-            }
-            res.status = 404; res.set_content(err("Plugin not found"), "application/json");
-        });
-
-        // ── MCP Streamable HTTP transport (protocol version 2024-11-05) ─────
-        // POST /mcp  – JSON-RPC 2.0 requests (initialize / tools/list / tools/call)
-        svr.Post("/mcp", [this](const httplib::Request& req, httplib::Response& res) {
-            handleMcpPost(req, res);
-        });
-
-        // GET /mcp  – SSE stream for server-sent notifications
+        // MCP Streamable HTTP transport: JSON-RPC 2.0 over POST; GET answers with an empty event stream.
+        svr.Post("/mcp", [this](const httplib::Request& req, httplib::Response& res) { handleMcpPost(req, res); });
         svr.Get("/mcp", [](const httplib::Request&, httplib::Response& res) {
             res.set_header("Content-Type", "text/event-stream");
             res.set_header("Cache-Control", "no-cache");
-            res.set_header("Connection", "keep-alive");
             res.body   = ": My lil MCP\n\n";
             res.status = 200;
         });
 
-        // Signal activity LED for every completed request (thread-safe atomic write)
         svr.set_logger([this](const httplib::Request&, const httplib::Response&) {
             if (parent) parent->activityFlag.store(true, std::memory_order_relaxed);
         });

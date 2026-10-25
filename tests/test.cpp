@@ -52,6 +52,7 @@ void testGuard()
     check (guard::isAllowedOrigin ("http://localhost:5173"), "loopback origin allowed");
     check (guard::isAllowedOrigin ("http://127.0.0.1"), "loopback origin without port allowed");
     check (! guard::isAllowedOrigin ("https://evil.com"), "foreign origin refused");
+    check (! guard::isAllowedOrigin ("http://evil.com"), "foreign http origin refused");
     check (! guard::isAllowedOrigin ("http://localhost.evil.com"), "spoofed loopback origin refused");
     check (! guard::isAllowedOrigin ("null"), "opaque origin refused");
 }

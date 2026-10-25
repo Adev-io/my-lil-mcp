@@ -75,7 +75,6 @@ public:
     ~RackHttpServer();
 
     std::string getLayoutPrefsJson();
-    rack::math::Vec computeAutoPosition(int64_t nearModuleId = -1, float moduleWidth = 0.f);
     std::string dispatchTool(const std::string& name, const std::string& args);
     void handleMcpPost(const httplib::Request& req, httplib::Response& res);
     void setupRoutes();
