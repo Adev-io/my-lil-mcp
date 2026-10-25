@@ -28,21 +28,27 @@ using namespace rack;
 
 // ─── UI Task Queue ─────────────────────────────────────────────────────────
 
-std::future<void> UITaskQueue::post(std::function<void()> fn, const std::string& label) {
+std::future<void> UITaskQueue::post(std::function<void()> fn, const std::string& label, std::shared_ptr<std::atomic<int>> state) {
     auto p = std::make_shared<std::promise<void>>();
     {
         std::lock_guard<std::mutex> lock(mutex);
-        tasks.push({fn, p, label});
+        tasks.push({fn, p, state, label});
     }
     return p->get_future();
 }
 
 bool UITaskQueue::postSync(std::function<void()> fn, const std::string& label, int timeoutSecs) {
-    auto fut = post(fn, label);
+    auto state = std::make_shared<std::atomic<int>>(0);
+    auto fut = post(fn, label, state);
     if (fut.wait_for(std::chrono::seconds(timeoutSecs)) == std::future_status::timeout) {
-        WARN("[RackMcpServer] postSync: task '%s' timed out after %ds (UI thread not draining)",
-             label.c_str(), timeoutSecs);
-        return false;
+        int expected = 0;
+        if (state->compare_exchange_strong(expected, 2)) {
+            // Still queued: it will be skipped, so the references captured by fn are never touched.
+            WARN("[RackMcpServer] postSync: task '%s' timed out after %ds (UI thread not draining)", label.c_str(), timeoutSecs);
+            return false;
+        }
+        // Already running: its captures are live, so wait for it rather than return into a dangling frame.
+        fut.wait();
     }
     try { fut.get(); } catch (...) {}
     return true;
@@ -57,6 +63,13 @@ void UITaskQueue::drain() {
     while (!local.empty()) {
         auto& task = local.front();
         const std::string& lbl = task.label.empty() ? "(unlabelled)" : task.label;
+        int expected = 0;
+        if (!task.state->compare_exchange_strong(expected, 1)) {
+            INFO("[RackMcpServer] drain: task '%s' skipped (timed out)", lbl.c_str());
+            task.promise->set_value();
+            local.pop();
+            continue;
+        }
         INFO("[RackMcpServer] drain: executing task '%s'", lbl.c_str());
         try {
             task.fn();

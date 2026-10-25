@@ -13,15 +13,16 @@
 
 struct UITaskQueue {
     struct Task {
-        std::function<void()>          fn;
+        std::function<void()>               fn;
         std::shared_ptr<std::promise<void>> promise;
-        std::string                    label;
+        std::shared_ptr<std::atomic<int>>   state;   // 0 queued, 1 running, 2 cancelled (timed out before it ran)
+        std::string                         label;
     };
 
     std::mutex       mutex;
     std::queue<Task> tasks;
 
-    std::future<void> post(std::function<void()> fn, const std::string& label = "");
+    std::future<void> post(std::function<void()> fn, const std::string& label, std::shared_ptr<std::atomic<int>> state);
     // Returns false if the UI thread did not execute the task within timeoutSecs.
     bool postSync(std::function<void()> fn, const std::string& label = "", int timeoutSecs = 10);
     void drain();
