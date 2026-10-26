@@ -207,8 +207,10 @@ STEPS.append(test_measure)
 
 
 def test_voltages(base, vco):
-    # Rack keeps an unplugged output at 0 channels (no voltages), so patch the feedback cable for the snapshot.
-    c = call(base, 'vcvrack_add_cable', {'outputModuleId': vco['id'], 'outputId': 0, 'inputModuleId': vco['id'], 'inputId': 0})
+    # Rack keeps an unplugged output at 0 channels (no voltages), so cable VCO out 0 into the MCP module's LISTEN L for the snapshot
+    # (into its own V/OCT the VCO would frequency-modulate itself).
+    mcp = call(base, 'vcvrack_get_mcp_position')['id']
+    c = call(base, 'vcvrack_add_cable', {'outputModuleId': vco['id'], 'outputId': 0, 'inputModuleId': mcp, 'inputId': 0})
     time.sleep(0.1)
     try:
         v = call(base, 'vcvrack_get_voltages', {'moduleId': vco['id']})
@@ -219,6 +221,7 @@ def test_voltages(base, vco):
     check(sine['channels'] >= 1 and abs(sine['voltages'][0]) <= 5.01, 'VCO output 0 is a voltage within +/-5 V', sine['voltages'][0])
     allv = call(base, 'vcvrack_get_voltages')
     check(len(allv) >= 2, 'get_voltages for the whole patch', len(allv))
+    check(all(p['channels'] > 0 for m in allv for p in m['inputs'] + m['outputs']), 'whole-patch snapshot lists only live ports')
 
 
 STEPS.append(test_voltages)
