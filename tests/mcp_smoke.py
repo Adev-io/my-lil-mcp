@@ -15,7 +15,7 @@ EXPECTED_TOOLS = ['vcvrack_get_status', 'vcvrack_list_modules', 'vcvrack_get_mod
                   'vcvrack_add_cable', 'vcvrack_delete_cable', 'vcvrack_search_library', 'vcvrack_get_rack_layout',
                   'vcvrack_undo', 'vcvrack_redo', 'vcvrack_save_patch', 'vcvrack_bypass_module',
                   'vcvrack_move_module', 'vcvrack_get_module_state', 'vcvrack_set_module_state',
-                  'vcvrack_find_unpatched', 'vcvrack_measure']
+                  'vcvrack_find_unpatched', 'vcvrack_measure', 'vcvrack_get_voltages']
 fails = 0
 
 
@@ -204,6 +204,24 @@ def test_measure(base, vco):
 
 
 STEPS.append(test_measure)
+
+
+def test_voltages(base, vco):
+    # Rack keeps an unplugged output at 0 channels (no voltages), so patch the feedback cable for the snapshot.
+    c = call(base, 'vcvrack_add_cable', {'outputModuleId': vco['id'], 'outputId': 0, 'inputModuleId': vco['id'], 'inputId': 0})
+    time.sleep(0.1)
+    try:
+        v = call(base, 'vcvrack_get_voltages', {'moduleId': vco['id']})
+    finally:
+        call(base, 'vcvrack_delete_cable', {'id': c['id']})
+    check(len(v) == 1 and v[0]['id'] == vco['id'], 'get_voltages for one module')
+    sine = v[0]['outputs'][0]
+    check(sine['channels'] >= 1 and abs(sine['voltages'][0]) <= 5.01, 'VCO output 0 is a voltage within +/-5 V', sine['voltages'][0])
+    allv = call(base, 'vcvrack_get_voltages')
+    check(len(allv) >= 2, 'get_voltages for the whole patch', len(allv))
+
+
+STEPS.append(test_voltages)
 
 if __name__ == '__main__':
     main()

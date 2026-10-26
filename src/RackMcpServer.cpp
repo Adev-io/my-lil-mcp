@@ -135,6 +135,15 @@ static std::string serializePortInfo(engine::Port* port, PortInfo* pi, int portI
     return s;
 }
 
+static std::string serializePortVoltages(engine::Port& port, PortInfo* pi, int id) {
+    std::string s = "{" + jsonKV("id", std::to_string(id)) + jsonKVs("name", pi ? pi->name : "")
+                  + jsonKV("connected", port.isConnected() ? "true" : "false");
+    const int ch = port.getChannels();
+    s += jsonKV("channels", std::to_string(ch)) + jsonStr("voltages") + ": [";
+    for (int c = 0; c < ch; c++) s += std::string(c ? "," : "") + jsonNum(port.getVoltage(c));
+    return s + "]}";
+}
+
 static std::string serializeModuleDetail(engine::Module* mod) {
     if (!mod) return "null";
     std::string s = "{";
@@ -332,7 +341,8 @@ static const char* MCP_TOOLS_JSON = R"json([
 {"name":"vcvrack_get_module_state","description":"The module's full state as Rack's own JSON (params and internal data). Keep it to restore later with vcvrack_set_module_state, e.g. before experimenting with a sound.","inputSchema":{"type":"object","properties":{"id":{"type":"integer"}},"required":["id"]}},
 {"name":"vcvrack_set_module_state","description":"Restore a module's state from JSON returned by vcvrack_get_module_state (same model only). Undoable.","inputSchema":{"type":"object","properties":{"id":{"type":"integer"},"state":{"type":"object"}},"required":["id","state"]}},
 {"name":"vcvrack_find_unpatched","description":"For every module, the inputs and outputs with no cable. Use it to spot a voice that never reaches the output or a modulation input left empty.","inputSchema":{"type":"object","properties":{}}},
-{"name":"vcvrack_measure","description":"Listen to audio for `seconds` (0.1-10, default 1) and report RMS/peak/crest/DC/clipped samples per channel plus BS.1770 loudness (LUFS). Source: pass moduleId+outputId and the tool patches that output into the MCP module's LISTEN L input for the window and removes the cable after; or patch anything into LISTEN L/R yourself with vcvrack_add_cable and call with no moduleId. dBFS is against Rack's 10 V full scale, so a nominal +/-5 V signal reads about -6 dBFS peak; clippedSamples counts samples beyond 10 V. Use this instead of vcvrack_get_voltages for audio. LUFS is ungated (whole-window K-weighted power, no 400 ms gating), so a window holding silence reads lower than a gated meter. nonFiniteSamples > 0 means the source sends NaN/inf; treat the channel as broken, not silent. `seconds` is wall-clock; `samples` says how much audio was actually seen.","inputSchema":{"type":"object","properties":{"moduleId":{"type":"integer"},"outputId":{"type":"integer","description":"Output port index on moduleId (default 0)"},"seconds":{"type":"number"}}}}
+{"name":"vcvrack_measure","description":"Listen to audio for `seconds` (0.1-10, default 1) and report RMS/peak/crest/DC/clipped samples per channel plus BS.1770 loudness (LUFS). Source: pass moduleId+outputId and the tool patches that output into the MCP module's LISTEN L input for the window and removes the cable after; or patch anything into LISTEN L/R yourself with vcvrack_add_cable and call with no moduleId. dBFS is against Rack's 10 V full scale, so a nominal +/-5 V signal reads about -6 dBFS peak; clippedSamples counts samples beyond 10 V. Use this instead of vcvrack_get_voltages for audio. LUFS is ungated (whole-window K-weighted power, no 400 ms gating), so a window holding silence reads lower than a gated meter. nonFiniteSamples > 0 means the source sends NaN/inf; treat the channel as broken, not silent. `seconds` is wall-clock; `samples` says how much audio was actually seen.","inputSchema":{"type":"object","properties":{"moduleId":{"type":"integer"},"outputId":{"type":"integer","description":"Output port index on moduleId (default 0)"},"seconds":{"type":"number"}}}},
+{"name":"vcvrack_get_voltages","description":"One snapshot of every input and output port's current voltages, per polyphony channel, for one module (moduleId) or the whole patch. Good for CV, gates, clocks and pitch (1 V/oct); for audio levels use vcvrack_measure.","inputSchema":{"type":"object","properties":{"moduleId":{"type":"integer"}}}}
 ])json";
 
 // ─── MCP prompts ────────────────────────────────────────────────────────────
@@ -1329,6 +1339,32 @@ std::string RackHttpServer::dispatchTool(const std::string& name, const std::str
                         + jsonKV("silent", r.silent ? "true" : "false") + jsonKV("lufs", jsonNum(r.lufs))
                         + jsonKV("left", chJson(0)) + jsonKV("right", chJson(1))
                         + jsonKVs("scale", "dBFS against Rack's 10 V full scale (Core Audio clips there); a nominal +/-5 V signal reads -6 dBFS peak", true) + "}");
+        }
+
+        if (name == "vcvrack_get_voltages") {
+            int64_t only = (int64_t)parseJsonDouble(args, "moduleId", -1);
+            std::string body;
+            if (!taskQueue->postSync([rackApp, only, &body]() {
+                body = "[";
+                bool first = true;
+                for (int64_t id : rackApp->engine->getModuleIds()) {
+                    if (only >= 0 && id != only) continue;
+                    engine::Module* mod = rackApp->engine->getModule(id);
+                    if (!mod) continue;
+                    std::string ins = "[", outs = "[";
+                    for (int i = 0; i < (int)mod->inputs.size(); i++)
+                        ins += std::string(i ? "," : "") + serializePortVoltages(mod->inputs[i], i < (int)mod->inputInfos.size() ? mod->inputInfos[i] : nullptr, i);
+                    for (int i = 0; i < (int)mod->outputs.size(); i++)
+                        outs += std::string(i ? "," : "") + serializePortVoltages(mod->outputs[i], i < (int)mod->outputInfos.size() ? mod->outputInfos[i] : nullptr, i);
+                    if (!first) body += ",";
+                    first = false;
+                    body += "{" + jsonKV("id", std::to_string(id)) + jsonKVs("name", mod->model ? mod->model->name : "")
+                          + jsonKV("inputs", ins + "]") + jsonKV("outputs", outs + "]", true) + "}";
+                }
+                body += "]";
+            }, "get_voltages")) return toolFail("UI thread not responding (timed out)");
+            if (only >= 0 && body == "[]") return toolFail("Module not found: " + std::to_string(only));
+            return toolOk(body);
         }
 
         return toolFail("Unknown tool: " + name);
