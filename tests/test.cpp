@@ -25,6 +25,8 @@ void testJson()
     check (ok ("[1]") == "{\"status\": \"ok\", \"data\": [1]}", "ok() wrapper");
     check (err ("x") == "{\"status\": \"error\", \"message\": \"x\"}", "err() wrapper");
     check (jsonNum (-9.0309) == "-9.031", "jsonNum three decimals");
+    check (jsonNum (NAN) == "null", "jsonNum NaN -> null");
+    check (jsonNum (INFINITY) == "null", "jsonNum inf -> null");
     check (parseJsonString ("{\"name\": \"VCO\"}", "name") == "VCO", "parseJsonString");
     check (parseJsonString ("{}", "name") == "", "parseJsonString missing -> empty");
     check (parseJsonString ("{\"p\": \"C:\\\\Users\\\\a\\\\x.vcv\"}", "p") == "C:\\Users\\a\\x.vcv", "parseJsonString unescapes backslashes");
@@ -82,14 +84,25 @@ void testMeter()
     check (near (r.crestDb[0], 3.0103, 1e-2), "sine crest is 3.01 dB", r.crestDb[0]);
     check (std::fabs (r.dc[0]) < 1e-3, "sine has no DC", r.dc[0]);
     check (r.clips[0] == 0 && r.clips[1] == 0, "no clips");
-    check (std::fabs (r.lufs + 3.01) < 0.1, "one channel 0 dBFS 997 Hz = -3.01 LUFS", r.lufs);
+    check (std::fabs (r.lufs + 3.01) < 0.01, "one channel 0 dBFS 997 Hz = -3.01 LUFS", r.lufs);
     check (r.rmsDb[1] <= -170.0 && ! r.silent, "empty right channel reads as floor; window not silent", r.rmsDb[1]);
 
     // Both channels: 0 LUFS.
     Meter m2;
     m2.setSampleRate (48000.0);
     for (int i = 0; i < 48000; ++i) { const float v = (float) std::sin (2 * kPi * 997.0 * i / 48000.0); m2.push (v, v); }
-    check (std::fabs (m2.report().lufs) < 0.1, "both channels 0 dBFS 997 Hz = 0 LUFS", m2.report().lufs);
+    r = m2.report();
+    check (std::fabs (r.lufs) < 0.01, "both channels 0 dBFS 997 Hz = 0 LUFS", r.lufs);
+
+    // The K-weighting is designed per rate, so the reference tone stays near -3.01 LUFS away from 48 kHz too.
+    for (double fs : { 44100.0, 192000.0 })
+    {
+        Meter mf;
+        mf.setSampleRate (fs);
+        for (int i = 0; i < (int) fs; ++i) mf.push ((float) std::sin (2 * kPi * 997.0 * i / fs), 0.f);
+        const double lufs = mf.report().lufs;
+        check (near (lufs, -3.01, 0.05), fs < 48000 ? "one channel sine = -3.01 LUFS at 44.1 kHz" : "one channel sine = -3.01 LUFS at 192 kHz", lufs);
+    }
 
     // DC and clipping: 0.5 is -6.02 dB of pure offset; 1.5 is over full scale on every sample.
     Meter m3;
@@ -98,6 +111,22 @@ void testMeter()
     r = m3.report();
     check (near (r.dc[0], 0.5, 1e-6) && near (r.rmsDb[0], -6.0206, 1e-3), "DC offset and its RMS", r.dc[0]);
     check (r.clips[0] == 0 && r.clips[1] == 1000, "clips counted per channel", (double) r.clips[1]);
+
+    // Negative overs clip too; |-1.5| is +3.52 dBFS.
+    Meter mn;
+    mn.setSampleRate (48000.0);
+    for (int i = 0; i < 10; ++i) mn.push (-1.5f, 0.f);
+    r = mn.report();
+    check (r.clips[0] == 10 && near (r.peakDb[0], 3.5218, 1e-3), "negative overs clip and set the peak", r.peakDb[0]);
+
+    // Non-finite samples are counted and skipped, so they cannot poison the window.
+    Meter mx;
+    mx.setSampleRate (48000.0);
+    mx.push (NAN, INFINITY);
+    for (int i = 0; i < 1000; ++i) mx.push (0.5f, 0.5f);
+    r = mx.report();
+    check (r.nonFinite[0] == 1 && r.nonFinite[1] == 1, "non-finite samples counted per channel", (double) r.nonFinite[0]);
+    check (std::isfinite (r.lufs) && near (r.dc[0], 0.5, 1e-6) && r.samples == 1001, "non-finite samples skipped; window stays finite", r.lufs);
 
     // reset() keeps the design, empties the window.
     m3.reset();

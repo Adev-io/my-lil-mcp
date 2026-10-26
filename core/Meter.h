@@ -1,6 +1,8 @@
 // Meter.h: level meter for the LISTEN inputs. Push normalised samples (1.0 = Rack's 10 V full scale, what Core Audio
-// clips at), read a Report: RMS / peak / crest / DC / clipped samples per channel and a BS.1770 K-weighted loudness over
-// the whole window. No Rack dependency, no threads: the module owns the reset/snapshot handshake.
+// clips at), read a Report: RMS / peak / crest / DC / clipped samples per channel and an ungated BS.1770 K-weighted
+// loudness over the whole window (no 400 ms gating: a window holding silence reads lower than a gated meter).
+// Call setSampleRate() before push(); a default-constructed Meter has identity filters and measures unweighted power.
+// No Rack dependency, no threads: the module owns the reset/snapshot handshake.
 // Author: Ari Klopfer / A_Development. MIT
 #pragma once
 #include <cmath>
@@ -55,13 +57,13 @@ struct Meter
     struct Channel
     {
         double sumSq = 0, sum = 0, peak = 0, kSumSq = 0;
-        int64_t clips = 0;
+        int64_t clips = 0, nonFinite = 0;
         Biquad shelf, hp;
     };
     struct Report
     {
         double rmsDb[2] = {}, peakDb[2] = {}, crestDb[2] = {}, dc[2] = {};
-        int64_t clips[2] = {};
+        int64_t clips[2] = {}, nonFinite[2] = {};
         double lufs = 0;
         int64_t samples = 0;
         bool silent = true;
@@ -78,7 +80,7 @@ struct Meter
 
     void reset()   // keeps the filter design, empties the window
     {
-        for (Channel& c : ch) { c.sumSq = c.sum = c.peak = c.kSumSq = 0; c.clips = 0; c.shelf.clear(); c.hp.clear(); }
+        for (Channel& c : ch) { c.sumSq = c.sum = c.peak = c.kSumSq = 0; c.clips = c.nonFinite = 0; c.shelf.clear(); c.hp.clear(); }
         samples = 0;
     }
 
@@ -88,7 +90,9 @@ struct Meter
         for (int i = 0; i < 2; ++i)
         {
             Channel& c = ch[i];
-            const double x = v[i], a = std::fabs (x);
+            const double x = v[i];
+            if (! std::isfinite (x)) { ++c.nonFinite; continue; }   // Rack does not sanitise cables; one NaN would poison the window
+            const double a = std::fabs (x);
             c.sumSq += x * x;
             c.sum += x;
             if (a > c.peak) c.peak = a;
@@ -105,20 +109,22 @@ struct Meter
     {
         Report r;
         r.samples = samples;
-        const double n = samples > 0 ? (double) samples : 1.0;
         double kPower = 0, peak = 0;
         for (int i = 0; i < 2; ++i)
         {
             const Channel& c = ch[i];
+            const int64_t taken = samples - c.nonFinite;   // skipped samples must not dilute the averages
+            const double n = taken > 0 ? (double) taken : 1.0;
             r.rmsDb[i] = db (std::sqrt (c.sumSq / n));
             r.peakDb[i] = db (c.peak);
             r.crestDb[i] = r.peakDb[i] - r.rmsDb[i];
             r.dc[i] = c.sum / n;
             r.clips[i] = c.clips;
+            r.nonFinite[i] = c.nonFinite;
             kPower += c.kSumSq / n;
             if (c.peak > peak) peak = c.peak;
         }
-        r.lufs = kPower > 1e-18 ? -0.691 + 10.0 * std::log10 (kPower) : -180.0;
+        r.lufs = kPower > 1e-18 ? -0.691 + 10.0 * std::log10 (kPower) : -180.0;   // ponytail: ungated; add 400 ms blocks + the -70 LUFS / -10 LU gates when windows hold silence
         r.silent = peak < 1e-4;
         return r;
     }

@@ -2,6 +2,7 @@
 // No Rack dependency. jansson is used where a whole document must be parsed (module state).
 // Author: Ari Klopfer / A_Development. MIT (forked from Neural Harmonics MCP Server, MIT)
 #pragma once
+#include <cmath>
 #include <cstdio>
 #include <string>
 
@@ -25,6 +26,7 @@ inline std::string jsonStr (const std::string& s)
 
 inline std::string jsonNum (double v)
 {
+    if (! std::isfinite (v)) return "null";   // JSON has no inf/nan
     char b[32];
     std::snprintf (b, sizeof b, "%.3f", v);
     return b;
