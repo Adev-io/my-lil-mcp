@@ -58,7 +58,8 @@ def mascot(cx, cy, r):
     ])
 
 
-def panel(W, title_x, mascot_x, layout, extras, pad_r, band=8.6, title_size=4.3, title_y=6.3, below=True, title='MY LIL ACID BASS'):
+def panel(W, title_x, mascot_x, layout, extras, pad_r, band=8.6, title_size=4.3, title_y=6.3, below=True, title='MY LIL ACID BASS',
+          footer_x=None, footer_anchor='middle', footer_size=2.4):
     """The common frame: ink panel, lime title band, mascot, brand; then the extras and the labelled components.
     Labels sit below the components (or above, below=False), one baseline per row set by the row's biggest part."""
     out = [
@@ -86,7 +87,7 @@ def panel(W, title_x, mascot_x, layout, extras, pad_r, band=8.6, title_size=4.3,
         reach = pad_r if kind == 'out' else rowmax[y]
         ly = y + reach + 2.8 if below else y - reach - 2.3
         out.append(text(label, x, ly, LABEL_SIZE[kind], colour, stroke=stroke))
-    out.append(text('A_DEVELOPMENT', W / 2, 125.6, 2.4, DIM))
+    out.append(text('A_DEVELOPMENT', W / 2 if footer_x is None else footer_x, 125.6, footer_size, DIM, anchor=footer_anchor))
     out.append('</svg>')
     return '\n'.join(out) + '\n'
 
@@ -120,7 +121,8 @@ def header():
 
 if __name__ == '__main__':
     files = {
-        os.path.join('res', 'Mcp.svg'): panel(W, 11, 24.8, MCP, EXTRAS, pad_r=5.6, band=BAND, title_size=2.8, title_y=8.4, title='MY LIL MCP'),
+        os.path.join('res', 'Mcp.svg'): panel(W, 11, 24.8, MCP, EXTRAS, pad_r=5.6, band=BAND, title_size=2.8, title_y=8.4, title='MY LIL MCP',
+                                           footer_x=3.2, footer_anchor='start', footer_size=1.9),
         os.path.join('src', 'layout.hpp'): header(),
     }
     for rel, body in files.items():
