@@ -214,14 +214,15 @@ def test_voltages(base, vco):
     time.sleep(0.1)
     try:
         v = call(base, 'vcvrack_get_voltages', {'moduleId': vco['id']})
+        allv = call(base, 'vcvrack_get_voltages')   # while the cable is up, so the live-port filter has something to keep
     finally:
         call(base, 'vcvrack_delete_cable', {'id': c['id']})
     check(len(v) == 1 and v[0]['id'] == vco['id'], 'get_voltages for one module')
     sine = v[0]['outputs'][0]
     check(sine['channels'] >= 1 and abs(sine['voltages'][0]) <= 5.01, 'VCO output 0 is a voltage within +/-5 V', sine['voltages'][0])
-    allv = call(base, 'vcvrack_get_voltages')
     check(len(allv) >= 2, 'get_voltages for the whole patch', len(allv))
-    check(all(p['channels'] > 0 for m in allv for p in m['inputs'] + m['outputs']), 'whole-patch snapshot lists only live ports')
+    ports = [p for m in allv for p in m['inputs'] + m['outputs']]
+    check(len(ports) >= 2 and all(p['channels'] > 0 for p in ports), 'whole-patch snapshot lists only live ports', len(ports))
 
 
 STEPS.append(test_voltages)
