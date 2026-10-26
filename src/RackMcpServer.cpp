@@ -16,6 +16,7 @@
 #include <patch.hpp>
 #include "Json.h"
 #include "Guard.h"
+#include "layout.hpp"
 
 #include <sstream>
 #include <cstring>
@@ -514,6 +515,7 @@ void RackMcpServer::process(const ProcessArgs& args) {
     bool enabled = params[ENABLED_PARAM].getValue() > 0.5f;
     if (enabled && !wasEnabled) startServer((int)params[PORT_PARAM].getValue());
     else if (!enabled && wasEnabled) stopServer();
+    else if (enabled && restartRequest.exchange(false)) { stopServer(); startServer((int)params[PORT_PARAM].getValue()); }
     wasEnabled = enabled;
 
     if (server) {
@@ -1546,103 +1548,6 @@ void RackMcpServer::stopServer() {
     lights[RUNNING_LIGHT].setBrightness(0.f);
 }
 
-// ─── Port text field ──────────────────────────────────────────────────────
-
-PortTextField::PortTextField() {
-    multiline = false;
-    color = nvgRGB(0x7d, 0xec, 0xc2);
-    bgColor = nvgRGB(0x14, 0x1d, 0x33);
-    textOffset = Vec(0.f, 0.f);
-}
-
-void PortTextField::step() {
-    LedDisplayTextField::step();
-    if (!module) return;
-    if (APP->event->getSelectedWidget() != this) {
-        int p = (int)module->params[RackMcpServer::PORT_PARAM].getValue();
-        std::string s = std::to_string(p);
-        if (text != s) setText(s);
-    }
-}
-
-void PortTextField::drawLayer(const DrawArgs& args, int layer) {
-    if (layer != 1) return;
-    nvgScissor(args.vg, RECT_ARGS(args.clipBox));
-    nvgFontFaceId(args.vg, APP->window->uiFont->handle);
-    nvgFontSize(args.vg, 12.f);
-    nvgFillColor(args.vg, color);
-    nvgTextAlign(args.vg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
-    nvgText(args.vg, box.size.x / 2.f, box.size.y / 2.f, text.c_str(), NULL);
-    nvgResetScissor(args.vg);
-}
-
-void PortTextField::onSelectKey(const SelectKeyEvent& e) {
-    LedDisplayTextField::onSelectKey(e);
-    if (module && e.action == GLFW_PRESS && (e.key == GLFW_KEY_ENTER || e.key == GLFW_KEY_KP_ENTER)) {
-        module->params[RackMcpServer::PORT_PARAM].setValue((float)std::atoi(text.c_str()));
-        APP->event->setSelectedWidget(nullptr);
-    }
-}
-
-void PanelLabelWidget::drawLabel(const DrawArgs& args, float x, float y, std::string txt, float fontSize, NVGcolor col, int align) {
-    nvgFontFaceId(args.vg, APP->window->uiFont->handle);
-    nvgFontSize(args.vg, fontSize);
-    nvgTextLetterSpacing(args.vg, 0.3f);
-    nvgTextAlign(args.vg, align | NVG_ALIGN_MIDDLE);
-    nvgFillColor(args.vg, col);
-    nvgText(args.vg, x, y, txt.c_str(), NULL);
-}
-
-void PanelLabelWidget::drawDivider(const DrawArgs& args, float y) {
-    nvgBeginPath(args.vg);
-    nvgMoveTo(args.vg, mm2px(4.5f), y);
-    nvgLineTo(args.vg, box.size.x - mm2px(4.5f), y);
-    nvgStrokeWidth(args.vg, 1.0f);
-    nvgStrokeColor(args.vg, nvgRGBA(0x9a, 0xa8, 0xc9, 70));
-    nvgStroke(args.vg);
-}
-
-void PanelLabelWidget::drawCard(const DrawArgs& args, float xMm, float yMm, float wMm, float hMm) {
-    Rect r = Rect(mm2px(Vec(xMm, yMm)), mm2px(Vec(wMm, hMm)));
-    nvgBeginPath(args.vg);
-    nvgRoundedRect(args.vg, r.pos.x, r.pos.y, r.size.x, r.size.y, 7.f);
-    nvgFillColor(args.vg, nvgRGBA(0x13, 0x1a, 0x2d, 150));
-    nvgFill(args.vg);
-    nvgStrokeWidth(args.vg, 1.2f);
-    nvgStrokeColor(args.vg, nvgRGBA(0x84, 0x95, 0xbb, 90));
-    nvgStroke(args.vg);
-}
-
-void PanelLabelWidget::draw(const DrawArgs& args) {
-    const float cx = box.size.x / 2.f;
-    const float left = mm2px(6.5f);
-    NVGcolor title = nvgRGB(0xef, 0xf3, 0xff);
-    NVGcolor label = nvgRGB(0xaa, 0xb5, 0xd3);
-
-    drawLabel(args, cx, mm2px(12.f), "MCP SERVER", 11.0f, title);
-    drawLabel(args, cx, mm2px(19.f), "local bridge", 6.0f, nvgRGBA(0xc0, 0xcb, 0xe8, 140));
-
-    drawDivider(args, mm2px(27.f));
-    drawLabel(args, left, mm2px(36.f), "PORT", 7.2f, label, NVG_ALIGN_LEFT);
-    drawCard(args, 4.8f, 39.f, 20.9f, 12.0f);
-
-    drawDivider(args, mm2px(57.f));
-    drawLabel(args, mm2px(15.24f), mm2px(60.f), "POWER", 7.2f, label, NVG_ALIGN_CENTER);
-    drawCard(args, 4.8f, 63.f, 20.9f, 12.5f);
-
-    drawDivider(args, mm2px(78.f));
-    drawLabel(args, left, mm2px(81.f), "STATUS", 7.2f, label, NVG_ALIGN_LEFT);
-    drawCard(args, 4.8f, 84.f, 20.9f, 14.f);
-    // Sub-labels inside STATUS card
-    NVGcolor sublabel = nvgRGBA(0xaa, 0xb5, 0xd3, 160);
-    drawLabel(args, mm2px(10.5f), mm2px(95.f), "ONLINE", 5.5f, sublabel, NVG_ALIGN_CENTER);
-    drawLabel(args, mm2px(19.5f), mm2px(95.f), "ACTIVE", 5.5f, sublabel, NVG_ALIGN_CENTER);
-
-    drawDivider(args, mm2px(102.f));
-    drawLabel(args, left, mm2px(105.f), "CLOCK", 7.2f, label, NVG_ALIGN_LEFT);
-    drawCard(args, 4.8f, 108.f, 20.9f, 14.5f);
-}
-
 // ─── Widget ───────────────────────────────────────────────────────────────
 
 enum class MatrixTarget {
@@ -1701,49 +1606,49 @@ struct MatrixEditItem : MenuItem {
     }
 };
 
+struct PortTextField : TextField {
+    RackMcpServer* module = nullptr;
+    void onSelectKey(const SelectKeyEvent& e) override {
+        TextField::onSelectKey(e);
+        if (module && e.action == GLFW_PRESS && (e.key == GLFW_KEY_ENTER || e.key == GLFW_KEY_KP_ENTER)) {
+            int p = std::atoi(text.c_str());
+            if (p >= 2000 && p <= 9999) {
+                module->params[RackMcpServer::PORT_PARAM].setValue((float)p);
+                module->restartRequest.store(true);
+            }
+            APP->event->setSelectedWidget(nullptr);
+        }
+    }
+};
+
+struct PortEditItem : MenuItem {
+    RackMcpServer* module = nullptr;
+    Menu* createChildMenu() override {
+        Menu* menu = new Menu;
+        auto* field = createWidget<PortTextField>(Vec(0, 0));
+        field->box.size.x = 140.f;
+        field->module = module;
+        field->setText(std::to_string((int)module->params[RackMcpServer::PORT_PARAM].getValue()));
+        menu->addChild(field);
+        return menu;
+    }
+};
+
 RackMcpServerWidget::RackMcpServerWidget(RackMcpServer* module) {
-        setModule(module);
-        setPanel(createPanel(asset::plugin(pluginInstance, "res/McpServer.svg")));
+    setModule(module);
+    setPanel(createPanel(asset::plugin(pluginInstance, "res/Mcp.svg")));
+    addChild(createWidget<ScrewBlack>(Vec(RACK_GRID_WIDTH, 0)));
+    addChild(createWidget<ScrewBlack>(Vec(box.size.x - 2 * RACK_GRID_WIDTH, 0)));
+    addChild(createWidget<ScrewBlack>(Vec(RACK_GRID_WIDTH, RACK_GRID_HEIGHT - RACK_GRID_WIDTH)));
+    addChild(createWidget<ScrewBlack>(Vec(box.size.x - 2 * RACK_GRID_WIDTH, RACK_GRID_HEIGHT - RACK_GRID_WIDTH)));
 
-        // Corner screws
-        addChild(createWidget<ScrewSilver>(Vec(RACK_GRID_WIDTH, 0)));
-        addChild(createWidget<ScrewSilver>(Vec(box.size.x - 2 * RACK_GRID_WIDTH, 0)));
-        addChild(createWidget<ScrewSilver>(Vec(RACK_GRID_WIDTH, RACK_GRID_HEIGHT - RACK_GRID_WIDTH)));
-        addChild(createWidget<ScrewSilver>(Vec(box.size.x - 2 * RACK_GRID_WIDTH, RACK_GRID_HEIGHT - RACK_GRID_WIDTH)));
-
-        // Panel labels
-        auto* labels = createWidget<PanelLabelWidget>(Vec(0, 0));
-        labels->box.size = box.size;
-        addChild(labels);
-
-        // Port text field
-        portField = createWidget<PortTextField>(mm2px(Vec(6.0f, 40.75f)));
-        portField->box.size = mm2px(Vec(18.5f, 8.5f));
-        portField->module = module;
-        portField->setText(module
-            ? std::to_string((int)module->params[RackMcpServer::PORT_PARAM].getValue())
-            : "2600");
-        addChild(portField);
-
-        // Sticky enable switch
-        addParam(createParamCentered<CKSS>(
-            mm2px(Vec(15.24f, 69.25f)), module, RackMcpServer::ENABLED_PARAM));
-
-        // STATUS: online LED (green) — left column
-        addChild(createLightCentered<MediumLight<GreenLight>>(
-            mm2px(Vec(10.5f, 90.f)), module, RackMcpServer::RUNNING_LIGHT));
-
-        // STATUS: activity LED (yellow) — right column, blinks on API calls
-        addChild(createLightCentered<MediumLight<YellowLight>>(
-            mm2px(Vec(19.5f, 90.f)), module, RackMcpServer::ACTIVITY_LIGHT));
-
-        addInput(createInputCentered<PJ301MPort>(mm2px(Vec(9.0f, 100.f)), module, RackMcpServer::LISTEN_L_INPUT));
-        addInput(createInputCentered<PJ301MPort>(mm2px(Vec(21.5f, 100.f)), module, RackMcpServer::LISTEN_R_INPUT));
-
-        // Heartbeat output — re-centered in shifted CLOCK card (108–122.5 mm)
-        addOutput(createOutputCentered<PJ301MPort>(
-            mm2px(Vec(15.24f, 115.25f)), module, RackMcpServer::HEARTBEAT_OUTPUT));
-
+    namespace L = layout::mcp;
+    auto at = [](const float p[2]) { return mm2px(Vec(p[0], p[1])); };
+    addParam(createLightParamCentered<VCVLightLatch<MediumSimpleLight<LimeLight>>>(at(L::ENABLED_PARAM), module, RackMcpServer::ENABLED_PARAM, RackMcpServer::RUNNING_LIGHT));
+    addChild(createLightCentered<MediumLight<MagentaLight>>(at(L::ACTIVITY_LIGHT), module, RackMcpServer::ACTIVITY_LIGHT));
+    addInput(createInputCentered<PJ301MPort>(at(L::LISTEN_L_INPUT), module, RackMcpServer::LISTEN_L_INPUT));
+    addInput(createInputCentered<PJ301MPort>(at(L::LISTEN_R_INPUT), module, RackMcpServer::LISTEN_R_INPUT));
+    addOutput(createOutputCentered<PJ301MPort>(at(L::HEARTBEAT_OUTPUT), module, RackMcpServer::HEARTBEAT_OUTPUT));
 }
 
 void RackMcpServerWidget::step() {
@@ -1783,6 +1688,11 @@ void RackMcpServerWidget::appendContextMenu(Menu* menu) {
     if (!m) return;
 
     menu->addChild(new MenuSeparator());
+    auto port = new PortEditItem();
+    port->text = "Port";
+    port->rightText = std::to_string((int)m->params[RackMcpServer::PORT_PARAM].getValue()) + " " + RIGHT_ARROW;
+    port->module = m;
+    menu->addChild(port);
     menu->addChild(createMenuLabel("Matrix (MCP Anchor)"));
 
     auto editCols = new MatrixEditItem();

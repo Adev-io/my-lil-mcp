@@ -42,6 +42,7 @@ struct RackMcpServer : Module {
 
     // Activity indicator — written by HTTP thread, read by audio thread
     std::atomic<bool> activityFlag{false};
+    std::atomic<bool> restartRequest{false};   // set by the UI port editor; process() restarts a running server
     float activityTimer = 0.f;
 
     // LISTEN meter. Audio thread owns `meter`; HTTP asks for a reset through meterReset. HTTP bumps snapGen after the
@@ -96,25 +97,7 @@ public:
     void stop();
 };
 
-struct PortTextField : LedDisplayTextField {
-    RackMcpServer* module = nullptr;
-
-    PortTextField();
-    void step() override;
-    void drawLayer(const DrawArgs& args, int layer) override;
-    void onSelectKey(const SelectKeyEvent& e) override;
-};
-
-struct PanelLabelWidget : TransparentWidget {
-    void drawLabel(const DrawArgs& args, float x, float y, std::string txt, float fontSize, NVGcolor col, int align = NVG_ALIGN_CENTER);
-    void drawDivider(const DrawArgs& args, float y);
-    void drawCard(const DrawArgs& args, float xMm, float yMm, float wMm, float hMm);
-    void draw(const DrawArgs& args) override;
-};
-
 struct RackMcpServerWidget : ModuleWidget {
-    PortTextField* portField = nullptr;
-
     explicit RackMcpServerWidget(RackMcpServer* module);
     void step() override;
     void appendContextMenu(Menu* menu) override;
