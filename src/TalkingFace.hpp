@@ -6,7 +6,7 @@
 #include "plugin.hpp"
 #include <cmath>
 
-// Box = the face's disc. The panel SVG draws the disc, eyes and a flat mouth; this paints over that mouth.
+// Box = the face's disc. This repaints the whole disc with a running rainbow shader, then the eyes and mouth.
 struct TalkingFace : TransparentWidget
 {
     const FaceTap* tap = nullptr;   // null in the library / browser preview: draws a still sine
@@ -24,11 +24,28 @@ struct TalkingFace : TransparentWidget
         }
         level += 0.25f * (std::min (1.f, peak) - level);
 
-        nvgSave (a.vg);                                       // wipe the SVG's flat mouth, clipped to the disc
-        nvgScissor (a.vg, x0 - r * 0.12f, base - r * 0.42f, w + r * 0.24f, r * 0.84f);
-        nvgBeginPath (a.vg);
-        nvgCircle (a.vg, cx, cy, r * 0.97f);
-        nvgFillColor (a.vg, nvgRGB (0xff, 0x3d, 0x9a));
+        // Shadertoy default: col = 0.5 + 0.5 * cos (time + uv.xyx + (0,2,4)), painted as a 10x10 grid of cells clipped to the disc.
+        // Covers the SVG's pink disc, eyes and flat mouth; the eyes are redrawn below.
+        const float time = (float) system::getTime ();
+        const int G = 10;
+        nvgSave (a.vg);
+        for (int j = 0; j < G; ++j)
+            for (int i = 0; i < G; ++i)
+            {
+                const float u = (i + 0.5f) / G, vv = 1.f - (j + 0.5f) / G;
+                nvgSave (a.vg);
+                nvgScissor (a.vg, box.size.x * i / G, box.size.y * j / G, box.size.x / G + 0.3f, box.size.y / G + 0.3f);
+                nvgBeginPath (a.vg);
+                nvgCircle (a.vg, cx, cy, r);
+                nvgFillColor (a.vg, nvgRGBf (0.5f + 0.5f * std::cos (time + u), 0.5f + 0.5f * std::cos (time + vv + 2.f),
+                                             0.5f + 0.5f * std::cos (time + u + 4.f)));
+                nvgFill (a.vg);
+                nvgRestore (a.vg);
+            }
+        nvgBeginPath (a.vg);                                  // eyes, as the SVG draws them
+        nvgCircle (a.vg, cx - r * 0.37f, cy - r * 0.32f, r * 0.145f);
+        nvgCircle (a.vg, cx + r * 0.37f, cy - r * 0.32f, r * 0.145f);
+        nvgFillColor (a.vg, nvgRGB (0x16, 0x16, 0x1a));
         nvgFill (a.vg);
         nvgRestore (a.vg);
 
