@@ -44,13 +44,15 @@ struct RackMcpServer : Module {
     std::atomic<bool> activityFlag{false};
     float activityTimer = 0.f;
 
-    // LISTEN meter. Audio thread owns `meter`; HTTP asks for a reset or a snapshot through the flags and reads `snap`
-    // only after snapReady flips to 1.
+    // LISTEN meter. Audio thread owns `meter`; HTTP asks for a reset through meterReset. HTTP bumps snapGen after the
+    // window; the audio thread snapshots whenever snapGen != snapDone and then publishes snapDone = snapGen; HTTP reads
+    // `snap` only once snapDone equals the generation it asked for.
     Meter meter;
     std::atomic<int> meterReset{0};
-    std::atomic<int> snapRequest{0};
-    std::atomic<int> snapReady{0};
+    std::atomic<int> snapGen{0};
+    std::atomic<int> snapDone{0};
     Meter::Report snap;
+    std::mutex measureMutex;
 
     void onSampleRateChange(const SampleRateChangeEvent& e) override { meter.setSampleRate(e.sampleRate); }
 

@@ -185,16 +185,16 @@ STEPS.append(test_edit_tools)
 
 
 def test_measure(base, vco):
-    # Fundamental VCO sine: +/-5 V = -6.02 dBFS peak, -9.03 dBFS RMS against Rack's 10 V full scale.
+    # Fundamental 2.6.4's VCO draws its sine as a parabola (1 - 16x^2 per quarter cycle): RMS is 0.7303 of peak, so +/-5 V reads -6.02 dBFS peak, -8.75 RMS, 2.73 crest. A true sine would read -9.03 / 3.01. Expectations sit between the two.
     mcp = call(base, 'vcvrack_get_mcp_position')['id']
     m = call(base, 'vcvrack_measure', {'moduleId': vco['id'], 'outputId': 0, 'seconds': 1})
     check(m['samples'] > 20000, 'measure saw about a second of audio', m['samples'])
     check(abs(m['left']['peakDb'] + 6.02) < 0.3, 'VCO sine peaks at -6 dBFS', m['left']['peakDb'])
-    check(abs(m['left']['rmsDb'] + 9.03) < 0.3, 'VCO sine RMS -9 dBFS', m['left']['rmsDb'])
-    check(abs(m['left']['crestDb'] - 3.01) < 0.3, 'crest 3 dB', m['left']['crestDb'])
+    check(abs(m['left']['rmsDb'] + 8.9) < 0.3, 'VCO sine RMS about -8.9 dBFS (parabolic sine)', m['left']['rmsDb'])
+    check(abs(m['left']['crestDb'] - 2.87) < 0.3, 'crest about 2.9 dB', m['left']['crestDb'])
     check(m['left']['clippedSamples'] == 0 and abs(m['left']['dcOffset']) < 0.01, 'no clips, no DC')
     check(m['right']['rmsDb'] < -100, 'nothing patched into R reads as floor', m['right']['rmsDb'])
-    check(abs(m['lufs'] + 9.7) < 0.6, 'one channel of -6 dBFS sine is about -9.7 LUFS', m['lufs'])
+    check(abs(m['lufs'] + 9.75) < 0.6, 'one channel of a -6 dBFS parabolic sine is about -9.6 LUFS', m['lufs'])
     check(not any(c['inputModuleId'] == mcp for c in call(base, 'vcvrack_list_cables')), 'temporary cable removed')
     try:
         call(base, 'vcvrack_measure', {'seconds': 0.2})

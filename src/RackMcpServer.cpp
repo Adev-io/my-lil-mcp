@@ -332,7 +332,7 @@ static const char* MCP_TOOLS_JSON = R"json([
 {"name":"vcvrack_get_module_state","description":"The module's full state as Rack's own JSON (params and internal data). Keep it to restore later with vcvrack_set_module_state, e.g. before experimenting with a sound.","inputSchema":{"type":"object","properties":{"id":{"type":"integer"}},"required":["id"]}},
 {"name":"vcvrack_set_module_state","description":"Restore a module's state from JSON returned by vcvrack_get_module_state (same model only). Undoable.","inputSchema":{"type":"object","properties":{"id":{"type":"integer"},"state":{"type":"object"}},"required":["id","state"]}},
 {"name":"vcvrack_find_unpatched","description":"For every module, the inputs and outputs with no cable. Use it to spot a voice that never reaches the output or a modulation input left empty.","inputSchema":{"type":"object","properties":{}}},
-{"name":"vcvrack_measure","description":"Listen to audio for `seconds` (0.1-10, default 1) and report RMS/peak/crest/DC/clipped samples per channel plus BS.1770 loudness (LUFS). Source: pass moduleId+outputId and the tool patches that output into the MCP module's LISTEN L input for the window and removes the cable after; or patch anything into LISTEN L/R yourself with vcvrack_add_cable and call with no moduleId. dBFS is against Rack's 10 V full scale, so a nominal +/-5 V signal reads about -6 dBFS peak; clippedSamples counts samples beyond 10 V. Use this instead of vcvrack_get_voltages for audio. LUFS is ungated (whole-window K-weighted power, no 400 ms gating), so a window holding silence reads lower than a gated meter. nonFiniteSamples > 0 means the source sends NaN/inf; treat the channel as broken, not silent.","inputSchema":{"type":"object","properties":{"moduleId":{"type":"integer"},"outputId":{"type":"integer","description":"Output port index on moduleId (default 0)"},"seconds":{"type":"number"}}}}
+{"name":"vcvrack_measure","description":"Listen to audio for `seconds` (0.1-10, default 1) and report RMS/peak/crest/DC/clipped samples per channel plus BS.1770 loudness (LUFS). Source: pass moduleId+outputId and the tool patches that output into the MCP module's LISTEN L input for the window and removes the cable after; or patch anything into LISTEN L/R yourself with vcvrack_add_cable and call with no moduleId. dBFS is against Rack's 10 V full scale, so a nominal +/-5 V signal reads about -6 dBFS peak; clippedSamples counts samples beyond 10 V. Use this instead of vcvrack_get_voltages for audio. LUFS is ungated (whole-window K-weighted power, no 400 ms gating), so a window holding silence reads lower than a gated meter. nonFiniteSamples > 0 means the source sends NaN/inf; treat the channel as broken, not silent. `seconds` is wall-clock; `samples` says how much audio was actually seen.","inputSchema":{"type":"object","properties":{"moduleId":{"type":"integer"},"outputId":{"type":"integer","description":"Output port index on moduleId (default 0)"},"seconds":{"type":"number"}}}}
 ])json";
 
 // ─── MCP prompts ────────────────────────────────────────────────────────────
@@ -523,7 +523,8 @@ void RackMcpServer::process(const ProcessArgs& args) {
 
     if (meterReset.exchange(0)) meter.reset();
     meter.push(inputs[LISTEN_L_INPUT].getVoltage() * 0.1f, inputs[LISTEN_R_INPUT].getVoltage() * 0.1f);
-    if (snapRequest.exchange(0)) { snap = meter.report(); snapReady.store(1); }
+    const int g = snapGen.load();
+    if (g != snapDone.load()) { snap = meter.report(); snapDone.store(g); }
 }
 
 json_t* RackMcpServer::dataToJson() {
@@ -1258,6 +1259,8 @@ std::string RackHttpServer::dispatchTool(const std::string& name, const std::str
             int64_t srcMod = (int64_t)parseJsonDouble(args, "moduleId", -1);
             int srcOut = (int)parseJsonDouble(args, "outputId", 0);
             if (!parent) return toolFail("No module");
+            std::unique_lock<std::mutex> measureLock(parent->measureMutex, std::try_to_lock);
+            if (!measureLock.owns_lock()) return toolFail("A measure is already running; wait for it to finish");
             int64_t temp = -1;
             if (srcMod >= 0) {
                 const int64_t me = parent->id;
@@ -1283,24 +1286,36 @@ std::string RackHttpServer::dispatchTool(const std::string& name, const std::str
                     temp = c->id;
                 }, "measure/cable")) return toolFail("UI thread not responding (timed out)");
                 if (temp < 0) return toolFail("Could not patch that output into LISTEN L: bad module/port, or LISTEN L already has a cable");
-            } else if (!parent->inputs[RackMcpServer::LISTEN_L_INPUT].isConnected() && !parent->inputs[RackMcpServer::LISTEN_R_INPUT].isConnected()) {
-                return toolFail("Nothing is patched into the MCP module's LISTEN inputs. Pass moduleId/outputId, or add a cable into LISTEN L/R first.");
+            } else {
+                bool listening = false;
+                RackMcpServer* p = parent;
+                if (!taskQueue->postSync([p, &listening]() {
+                    listening = p->inputs[RackMcpServer::LISTEN_L_INPUT].isConnected() || p->inputs[RackMcpServer::LISTEN_R_INPUT].isConnected();
+                }, "measure/listening")) return toolFail("UI thread not responding (timed out)");
+                if (!listening)
+                    return toolFail("Nothing is patched into the MCP module's LISTEN inputs. Pass moduleId/outputId, or add a cable into LISTEN L/R first.");
             }
-            parent->snapReady.store(0);
             parent->meterReset.store(1);
-            std::this_thread::sleep_for(std::chrono::milliseconds((int)(seconds * 1000)));
-            parent->snapRequest.store(1);
-            for (int i = 0; i < 200 && !parent->snapReady.load(); ++i) std::this_thread::sleep_for(std::chrono::milliseconds(5));
-            const bool got = parent->snapReady.load() != 0;
+            // Sleep the window in 50 ms slices against a deadline, so a server stop is noticed without drifting the window.
+            const auto until = std::chrono::steady_clock::now() + std::chrono::milliseconds((int)(seconds * 1000));
+            for (auto now = std::chrono::steady_clock::now(); now < until; now = std::chrono::steady_clock::now()) {
+                if (!running.load()) return toolFail("Server stopping; measurement abandoned");
+                std::this_thread::sleep_for(std::min<std::chrono::steady_clock::duration>(std::chrono::milliseconds(50), until - now));
+            }
+            const int g = parent->snapGen.fetch_add(1) + 1;
+            for (int i = 0; i < 200 && parent->snapDone.load() != g; ++i) std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            const bool got = parent->snapDone.load() == g;
             const Meter::Report r = parent->snap;
+            bool removed = true;
             if (temp >= 0) {
                 const int64_t id = temp;
-                taskQueue->postSync([rackApp, id]() {
+                removed = taskQueue->postSync([rackApp, id]() {
                     app::CableWidget* cw = rackApp->scene->rack->getCable(id);
                     if (cw) { rackApp->scene->rack->removeCable(cw); delete cw; }
                 }, "measure/uncable");
             }
-            if (!got) return toolFail("The audio engine is not running, so nothing was measured");
+            if (!got) return toolFail("The audio engine is not running, so nothing was measured (or the MCP module is bypassed)");
+            if (temp >= 0 && !removed) return toolFail("Measured, but the temporary cable " + std::to_string(temp) + " into LISTEN L could not be removed (UI thread busy); delete it with vcvrack_delete_cable and measure again");
             auto chJson = [&](int i) {
                 return "{" + jsonKV("rmsDb", jsonNum(r.rmsDb[i])) + jsonKV("peakDb", jsonNum(r.peakDb[i])) + jsonKV("crestDb", jsonNum(r.crestDb[i]))
                      + jsonKV("dcOffset", jsonNum(r.dc[i])) + jsonKV("clippedSamples", std::to_string((long long)r.clips[i]))
@@ -1453,9 +1468,9 @@ void RackHttpServer::start() {
 
 void RackHttpServer::stop() {
     if (running) {
+        running = false;   // first, so a measure in progress sees it and returns before the join waits on it
         svr.stop();
         if (serverThread.joinable()) serverThread.join();
-        running = false;
     }
 }
 
