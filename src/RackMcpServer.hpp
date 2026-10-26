@@ -38,11 +38,11 @@ struct RackMcpServer : Module {
     UITaskQueue taskQueue;
     class RackHttpServer* server = nullptr;
     bool wasEnabled = false;
+    int serverPort = 0;   // the port startServer() last used; process() restarts when PORT_PARAM differs
     float heartbeatPhase = 0.f;
 
     // Activity indicator — written by HTTP thread, read by audio thread
     std::atomic<bool> activityFlag{false};
-    std::atomic<bool> restartRequest{false};   // set by the UI port editor; process() restarts a running server
     float activityTimer = 0.f;
 
     // LISTEN meter. Audio thread owns `meter`; HTTP asks for a reset through meterReset. HTTP bumps snapGen after the

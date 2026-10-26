@@ -503,8 +503,10 @@ static std::string buildPromptMessages(const std::string& name, const std::strin
 
 RackMcpServer::RackMcpServer() {
     config(NUM_PARAMS, NUM_INPUTS, NUM_OUTPUTS, NUM_LIGHTS);
-    configParam(PORT_PARAM, 2000.f, 9999.f, 2600.f, "HTTP Port")->snapEnabled = true;
-    configParam(ENABLED_PARAM, 0.f, 1.f, 0.f, "Enable HTTP Server");
+    ParamQuantity* port = configParam(PORT_PARAM, 2000.f, 9999.f, 2600.f, "HTTP Port");
+    port->snapEnabled = true;
+    port->randomizeEnabled = false;
+    configSwitch(ENABLED_PARAM, 0.f, 1.f, 0.f, "HTTP server", {"Off", "On"})->randomizeEnabled = false;
     configOutput(HEARTBEAT_OUTPUT, "Server heartbeat");
     configInput(LISTEN_L_INPUT, "Listen left (audio to measure)");
     configInput(LISTEN_R_INPUT, "Listen right");
@@ -515,8 +517,9 @@ void RackMcpServer::process(const ProcessArgs& args) {
     bool enabled = params[ENABLED_PARAM].getValue() > 0.5f;
     if (enabled && !wasEnabled) startServer((int)params[PORT_PARAM].getValue());
     else if (!enabled && wasEnabled) stopServer();
-    else if (enabled && restartRequest.exchange(false)) { stopServer(); startServer((int)params[PORT_PARAM].getValue()); }
+    else if (enabled && (int)params[PORT_PARAM].getValue() != serverPort) { stopServer(); startServer((int)params[PORT_PARAM].getValue()); }
     wasEnabled = enabled;
+    lights[RUNNING_LIGHT].setBrightness(server && server->running.load() ? 1.f : 0.f);
 
     if (server) {
         heartbeatPhase += args.sampleTime;
@@ -1531,10 +1534,10 @@ void RackMcpServer::startServer(int port) {
     stopServer();
     server = new RackHttpServer();
     server->port = port;
+    serverPort = port;
     server->taskQueue = &taskQueue;
     server->parent = this;
     server->start();
-    lights[RUNNING_LIGHT].setBrightness(1.f);
     INFO("[RackMcpServer] startServer: server running");
 }
 void RackMcpServer::stopServer() {
@@ -1545,7 +1548,6 @@ void RackMcpServer::stopServer() {
         server = nullptr;
         INFO("[RackMcpServer] stopServer: done");
     }
-    lights[RUNNING_LIGHT].setBrightness(0.f);
 }
 
 // ─── Widget ───────────────────────────────────────────────────────────────
@@ -1614,9 +1616,9 @@ struct PortTextField : TextField {
             int p = std::atoi(text.c_str());
             if (p >= 2000 && p <= 9999) {
                 module->params[RackMcpServer::PORT_PARAM].setValue((float)p);
-                module->restartRequest.store(true);
+                APP->event->setSelectedWidget(nullptr);
+                if (auto* o = getAncestorOfType<ui::MenuOverlay>()) o->requestDelete();
             }
-            APP->event->setSelectedWidget(nullptr);
         }
     }
 };
