@@ -21,7 +21,7 @@ fails = 0
 
 def check(ok, what, got=''):
     global fails
-    print(('ok    ' if ok else 'FAIL  ') + what + ('' if got == '' else '  (%s)' % got))
+    print(('ok    ' if ok else 'FAIL  ') + what + ('' if got == '' else '  (%s)' % (got,)))
     if not ok:
         fails += 1
 
