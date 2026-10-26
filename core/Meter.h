@@ -125,7 +125,7 @@ struct Meter
             if (c.peak > peak) peak = c.peak;
         }
         r.lufs = kPower > 1e-18 ? -0.691 + 10.0 * std::log10 (kPower) : -180.0;   // ponytail: ungated; add 400 ms blocks + the -70 LUFS / -10 LU gates when windows hold silence
-        r.silent = peak < 1e-4;
+        r.silent = peak < 1e-4 && r.nonFinite[0] == 0 && r.nonFinite[1] == 0;
         return r;
     }
 };

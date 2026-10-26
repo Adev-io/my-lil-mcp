@@ -139,6 +139,13 @@ void testMeter()
     for (int i = 0; i < 100; ++i) m4.push (0.f, 0.f);
     r = m4.report();
     check (r.silent && r.rmsDb[0] <= -170.0 && r.lufs <= -170.0, "silence reads as silent with floor values", r.lufs);
+
+    // A channel that is all NaN is broken, not silent.
+    Meter mnan;
+    mnan.setSampleRate (48000.0);
+    for (int i = 0; i < 100; ++i) mnan.push (NAN, 0.f);
+    r = mnan.report();
+    check (! r.silent && r.nonFinite[0] == 100, "all-NaN channel is not silent", (double) r.nonFinite[0]);
 }
 } // namespace
 

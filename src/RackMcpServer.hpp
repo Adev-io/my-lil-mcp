@@ -1,6 +1,7 @@
 #pragma once
 
 #include "plugin.hpp"
+#include "Meter.h"
 
 #include <httplib.h>
 
@@ -30,7 +31,7 @@ struct UITaskQueue {
 
 struct RackMcpServer : Module {
     enum ParamIds { PORT_PARAM, ENABLED_PARAM, NUM_PARAMS };
-    enum InputIds { NUM_INPUTS };
+    enum InputIds { LISTEN_L_INPUT, LISTEN_R_INPUT, NUM_INPUTS };
     enum OutputIds { HEARTBEAT_OUTPUT, NUM_OUTPUTS };
     enum LightIds { RUNNING_LIGHT, ACTIVITY_LIGHT, NUM_LIGHTS };
 
@@ -42,6 +43,16 @@ struct RackMcpServer : Module {
     // Activity indicator — written by HTTP thread, read by audio thread
     std::atomic<bool> activityFlag{false};
     float activityTimer = 0.f;
+
+    // LISTEN meter. Audio thread owns `meter`; HTTP asks for a reset or a snapshot through the flags and reads `snap`
+    // only after snapReady flips to 1.
+    Meter meter;
+    std::atomic<int> meterReset{0};
+    std::atomic<int> snapRequest{0};
+    std::atomic<int> snapReady{0};
+    Meter::Report snap;
+
+    void onSampleRateChange(const SampleRateChangeEvent& e) override { meter.setSampleRate(e.sampleRate); }
 
     std::mutex pendingDeleteMutex;
     std::vector<uint64_t> pendingDeleteIds;

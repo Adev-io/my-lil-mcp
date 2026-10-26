@@ -15,7 +15,7 @@ EXPECTED_TOOLS = ['vcvrack_get_status', 'vcvrack_list_modules', 'vcvrack_get_mod
                   'vcvrack_add_cable', 'vcvrack_delete_cable', 'vcvrack_search_library', 'vcvrack_get_rack_layout',
                   'vcvrack_undo', 'vcvrack_redo', 'vcvrack_save_patch', 'vcvrack_bypass_module',
                   'vcvrack_move_module', 'vcvrack_get_module_state', 'vcvrack_set_module_state',
-                  'vcvrack_find_unpatched']
+                  'vcvrack_find_unpatched', 'vcvrack_measure']
 fails = 0
 
 
@@ -182,6 +182,28 @@ def test_edit_tools(base, vco):
 
 
 STEPS.append(test_edit_tools)
+
+
+def test_measure(base, vco):
+    # Fundamental VCO sine: +/-5 V = -6.02 dBFS peak, -9.03 dBFS RMS against Rack's 10 V full scale.
+    mcp = call(base, 'vcvrack_get_mcp_position')['id']
+    m = call(base, 'vcvrack_measure', {'moduleId': vco['id'], 'outputId': 0, 'seconds': 1})
+    check(m['samples'] > 20000, 'measure saw about a second of audio', m['samples'])
+    check(abs(m['left']['peakDb'] + 6.02) < 0.3, 'VCO sine peaks at -6 dBFS', m['left']['peakDb'])
+    check(abs(m['left']['rmsDb'] + 9.03) < 0.3, 'VCO sine RMS -9 dBFS', m['left']['rmsDb'])
+    check(abs(m['left']['crestDb'] - 3.01) < 0.3, 'crest 3 dB', m['left']['crestDb'])
+    check(m['left']['clippedSamples'] == 0 and abs(m['left']['dcOffset']) < 0.01, 'no clips, no DC')
+    check(m['right']['rmsDb'] < -100, 'nothing patched into R reads as floor', m['right']['rmsDb'])
+    check(abs(m['lufs'] + 9.7) < 0.6, 'one channel of -6 dBFS sine is about -9.7 LUFS', m['lufs'])
+    check(not any(c['inputModuleId'] == mcp for c in call(base, 'vcvrack_list_cables')), 'temporary cable removed')
+    try:
+        call(base, 'vcvrack_measure', {'seconds': 0.2})
+        check(False, 'measure without a source refuses')
+    except RuntimeError as e:
+        check('LISTEN' in str(e), 'measure without a source refuses', str(e)[:60])
+
+
+STEPS.append(test_measure)
 
 if __name__ == '__main__':
     main()

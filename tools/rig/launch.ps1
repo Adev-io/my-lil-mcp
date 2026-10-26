@@ -6,6 +6,7 @@ $ErrorActionPreference = 'Stop'
 $repo = Split-Path (Split-Path $PSScriptRoot)
 $dist = Join-Path $repo 'dist\MyLilMcp'
 if (-not (Test-Path "$dist\plugin.dll")) { throw "No build at $dist. Run make dist first." }
+if (Get-Process Rack -ErrorAction SilentlyContinue) { throw "A Rack is already running (Rack Free allows one instance). Close it first." }
 $patchPath = (Resolve-Path $Patch).Path
 foreach ($x in $Extra) { if (-not (Test-Path "$env:LOCALAPPDATA\Rack2\plugins-win-x64\$x")) { throw "No plugin $x in Ari's Rack" } }
 $u = Join-Path $env:TEMP ("mcp-rig-" + (Get-Date -Format 'yyyyMMdd-HHmmss'))

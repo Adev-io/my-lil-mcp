@@ -23,6 +23,9 @@
 #include <cmath>
 #include <functional>
 #include <set>
+#include <thread>
+#include <chrono>
+#include <algorithm>
 
 using namespace rack;
 
@@ -328,7 +331,8 @@ static const char* MCP_TOOLS_JSON = R"json([
 {"name":"vcvrack_move_module","description":"Move a module to x/y in rack pixels (15 px per HP, 380 px per row); neighbours are pushed aside. Returns the final position. Undoable.","inputSchema":{"type":"object","properties":{"id":{"type":"integer"},"x":{"type":"number"},"y":{"type":"number"}},"required":["id","x","y"]}},
 {"name":"vcvrack_get_module_state","description":"The module's full state as Rack's own JSON (params and internal data). Keep it to restore later with vcvrack_set_module_state, e.g. before experimenting with a sound.","inputSchema":{"type":"object","properties":{"id":{"type":"integer"}},"required":["id"]}},
 {"name":"vcvrack_set_module_state","description":"Restore a module's state from JSON returned by vcvrack_get_module_state (same model only). Undoable.","inputSchema":{"type":"object","properties":{"id":{"type":"integer"},"state":{"type":"object"}},"required":["id","state"]}},
-{"name":"vcvrack_find_unpatched","description":"For every module, the inputs and outputs with no cable. Use it to spot a voice that never reaches the output or a modulation input left empty.","inputSchema":{"type":"object","properties":{}}}
+{"name":"vcvrack_find_unpatched","description":"For every module, the inputs and outputs with no cable. Use it to spot a voice that never reaches the output or a modulation input left empty.","inputSchema":{"type":"object","properties":{}}},
+{"name":"vcvrack_measure","description":"Listen to audio for `seconds` (0.1-10, default 1) and report RMS/peak/crest/DC/clipped samples per channel plus BS.1770 loudness (LUFS). Source: pass moduleId+outputId and the tool patches that output into the MCP module's LISTEN L input for the window and removes the cable after; or patch anything into LISTEN L/R yourself with vcvrack_add_cable and call with no moduleId. dBFS is against Rack's 10 V full scale, so a nominal +/-5 V signal reads about -6 dBFS peak; clippedSamples counts samples beyond 10 V. Use this instead of vcvrack_get_voltages for audio. LUFS is ungated (whole-window K-weighted power, no 400 ms gating), so a window holding silence reads lower than a gated meter. nonFiniteSamples > 0 means the source sends NaN/inf; treat the channel as broken, not silent.","inputSchema":{"type":"object","properties":{"moduleId":{"type":"integer"},"outputId":{"type":"integer","description":"Output port index on moduleId (default 0)"},"seconds":{"type":"number"}}}}
 ])json";
 
 // ─── MCP prompts ────────────────────────────────────────────────────────────
@@ -491,6 +495,9 @@ RackMcpServer::RackMcpServer() {
     configParam(PORT_PARAM, 2000.f, 9999.f, 2600.f, "HTTP Port")->snapEnabled = true;
     configParam(ENABLED_PARAM, 0.f, 1.f, 0.f, "Enable HTTP Server");
     configOutput(HEARTBEAT_OUTPUT, "Server heartbeat");
+    configInput(LISTEN_L_INPUT, "Listen left (audio to measure)");
+    configInput(LISTEN_R_INPUT, "Listen right");
+    meter.setSampleRate(44100.0);
 }
 
 void RackMcpServer::process(const ProcessArgs& args) {
@@ -513,6 +520,10 @@ void RackMcpServer::process(const ProcessArgs& args) {
         activityTimer -= args.sampleTime;
         lights[ACTIVITY_LIGHT].setBrightness(activityTimer > 0.f ? 1.f : 0.f);
     }
+
+    if (meterReset.exchange(0)) meter.reset();
+    meter.push(inputs[LISTEN_L_INPUT].getVoltage() * 0.1f, inputs[LISTEN_R_INPUT].getVoltage() * 0.1f);
+    if (snapRequest.exchange(0)) { snap = meter.report(); snapReady.store(1); }
 }
 
 json_t* RackMcpServer::dataToJson() {
@@ -1241,6 +1252,66 @@ std::string RackHttpServer::dispatchTool(const std::string& name, const std::str
             return toolOk(body);
         }
 
+        if (name == "vcvrack_measure") {
+            double seconds = parseJsonDouble(args, "seconds", 1.0);
+            seconds = std::max(0.1, std::min(10.0, seconds));
+            int64_t srcMod = (int64_t)parseJsonDouble(args, "moduleId", -1);
+            int srcOut = (int)parseJsonDouble(args, "outputId", 0);
+            if (!parent) return toolFail("No module");
+            int64_t temp = -1;
+            if (srcMod >= 0) {
+                const int64_t me = parent->id;
+                if (!taskQueue->postSync([rackApp, srcMod, srcOut, me, &temp]() {
+                    engine::Module* oMod = rackApp->engine->getModule(srcMod);
+                    engine::Module* iMod = rackApp->engine->getModule(me);
+                    app::ModuleWidget* oW = rackApp->scene->rack->getModule(srcMod);
+                    app::ModuleWidget* iW = rackApp->scene->rack->getModule(me);
+                    if (!oMod || !iMod || !oW || !iW) return;
+                    app::PortWidget* oPort = oW->getOutput(srcOut);
+                    app::PortWidget* iPort = iW->getInput(RackMcpServer::LISTEN_L_INPUT);
+                    if (!oPort || !iPort || !rackApp->scene->rack->getCablesOnPort(iPort).empty()) return;
+                    engine::Cable* c = new engine::Cable;
+                    c->outputModule = oMod; c->outputId = srcOut;
+                    c->inputModule = iMod;  c->inputId = RackMcpServer::LISTEN_L_INPUT;
+                    rackApp->engine->addCable(c);
+                    app::CableWidget* cw = new app::CableWidget;
+                    cw->color = rackApp->scene->rack->getNextCableColor();
+                    cw->setCable(c);
+                    cw->outputPort = oPort;
+                    cw->inputPort = iPort;
+                    rackApp->scene->rack->addCable(cw);   // temporary: no history entry
+                    temp = c->id;
+                }, "measure/cable")) return toolFail("UI thread not responding (timed out)");
+                if (temp < 0) return toolFail("Could not patch that output into LISTEN L: bad module/port, or LISTEN L already has a cable");
+            } else if (!parent->inputs[RackMcpServer::LISTEN_L_INPUT].isConnected() && !parent->inputs[RackMcpServer::LISTEN_R_INPUT].isConnected()) {
+                return toolFail("Nothing is patched into the MCP module's LISTEN inputs. Pass moduleId/outputId, or add a cable into LISTEN L/R first.");
+            }
+            parent->snapReady.store(0);
+            parent->meterReset.store(1);
+            std::this_thread::sleep_for(std::chrono::milliseconds((int)(seconds * 1000)));
+            parent->snapRequest.store(1);
+            for (int i = 0; i < 200 && !parent->snapReady.load(); ++i) std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            const bool got = parent->snapReady.load() != 0;
+            const Meter::Report r = parent->snap;
+            if (temp >= 0) {
+                const int64_t id = temp;
+                taskQueue->postSync([rackApp, id]() {
+                    app::CableWidget* cw = rackApp->scene->rack->getCable(id);
+                    if (cw) { rackApp->scene->rack->removeCable(cw); delete cw; }
+                }, "measure/uncable");
+            }
+            if (!got) return toolFail("The audio engine is not running, so nothing was measured");
+            auto chJson = [&](int i) {
+                return "{" + jsonKV("rmsDb", jsonNum(r.rmsDb[i])) + jsonKV("peakDb", jsonNum(r.peakDb[i])) + jsonKV("crestDb", jsonNum(r.crestDb[i]))
+                     + jsonKV("dcOffset", jsonNum(r.dc[i])) + jsonKV("clippedSamples", std::to_string((long long)r.clips[i]))
+                     + jsonKV("nonFiniteSamples", std::to_string((long long)r.nonFinite[i]), true) + "}";
+            };
+            return toolOk("{" + jsonKV("seconds", jsonNum(seconds)) + jsonKV("samples", std::to_string((long long)r.samples))
+                        + jsonKV("silent", r.silent ? "true" : "false") + jsonKV("lufs", jsonNum(r.lufs))
+                        + jsonKV("left", chJson(0)) + jsonKV("right", chJson(1))
+                        + jsonKVs("scale", "dBFS against Rack's 10 V full scale (Core Audio clips there); a nominal +/-5 V signal reads -6 dBFS peak", true) + "}");
+        }
+
         return toolFail("Unknown tool: " + name);
 }
 
@@ -1601,6 +1672,9 @@ RackMcpServerWidget::RackMcpServerWidget(RackMcpServer* module) {
         // STATUS: activity LED (yellow) — right column, blinks on API calls
         addChild(createLightCentered<MediumLight<YellowLight>>(
             mm2px(Vec(19.5f, 90.f)), module, RackMcpServer::ACTIVITY_LIGHT));
+
+        addInput(createInputCentered<PJ301MPort>(mm2px(Vec(9.0f, 100.f)), module, RackMcpServer::LISTEN_L_INPUT));
+        addInput(createInputCentered<PJ301MPort>(mm2px(Vec(21.5f, 100.f)), module, RackMcpServer::LISTEN_R_INPUT));
 
         // Heartbeat output — re-centered in shifted CLOCK card (108–122.5 mm)
         addOutput(createOutputCentered<PJ301MPort>(
