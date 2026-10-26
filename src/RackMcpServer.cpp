@@ -17,6 +17,7 @@
 #include "Json.h"
 #include "Guard.h"
 #include "layout.hpp"
+#include "TalkingFace.hpp"
 
 #include <sstream>
 #include <cstring>
@@ -538,6 +539,7 @@ void RackMcpServer::process(const ProcessArgs& args) {
 
     if (meterReset.exchange(0)) meter.reset();
     meter.push(inputs[LISTEN_L_INPUT].getVoltage() * 0.1f, inputs[LISTEN_R_INPUT].getVoltage() * 0.1f);
+    face.push((inputs[LISTEN_L_INPUT].getVoltage() + inputs[LISTEN_R_INPUT].getVoltage()) * 0.1f, args.sampleRate);
     const int g = snapGen.load();
     if (g != snapDone.load()) { snap = meter.report(); snapDone.store(g); }
 }
@@ -1639,12 +1641,16 @@ struct PortEditItem : MenuItem {
 RackMcpServerWidget::RackMcpServerWidget(RackMcpServer* module) {
     setModule(module);
     setPanel(createPanel(asset::plugin(pluginInstance, "res/Mcp.svg")));
+    namespace L = layout::mcp;
     addChild(createWidget<ScrewBlack>(Vec(RACK_GRID_WIDTH, 0)));
     addChild(createWidget<ScrewBlack>(Vec(box.size.x - 2 * RACK_GRID_WIDTH, 0)));
     addChild(createWidget<ScrewBlack>(Vec(RACK_GRID_WIDTH, RACK_GRID_HEIGHT - RACK_GRID_WIDTH)));
     addChild(createWidget<ScrewBlack>(Vec(box.size.x - 2 * RACK_GRID_WIDTH, RACK_GRID_HEIGHT - RACK_GRID_WIDTH)));
+    TalkingFace* f = createWidget<TalkingFace>(mm2px(Vec(L::FACE[0] - L::FACE[2], L::FACE[1] - L::FACE[2])));
+    f->box.size = mm2px(Vec(2 * L::FACE[2], 2 * L::FACE[2]));
+    if (module) f->tap = &module->face;
+    addChild(f);
 
-    namespace L = layout::mcp;
     auto at = [](const float p[2]) { return mm2px(Vec(p[0], p[1])); };
     addParam(createLightParamCentered<VCVLightLatch<MediumSimpleLight<LimeLight>>>(at(L::ENABLED_PARAM), module, RackMcpServer::ENABLED_PARAM, RackMcpServer::RUNNING_LIGHT));
     addChild(createLightCentered<MediumLight<MagentaLight>>(at(L::ACTIVITY_LIGHT), module, RackMcpServer::ACTIVITY_LIGHT));

@@ -2,6 +2,7 @@
 
 #include "plugin.hpp"
 #include "Meter.h"
+#include "FaceTap.h"
 
 #include <httplib.h>
 
@@ -53,6 +54,7 @@ struct RackMcpServer : Module {
     std::atomic<int> snapGen{0};
     std::atomic<int> snapDone{0};
     Meter::Report snap;
+    FaceTap face;   // the mascot's mouth: what LISTEN hears (audio thread writes, TalkingFace reads)
     std::mutex measureMutex;
 
     void onSampleRateChange(const SampleRateChangeEvent& e) override { meter.setSampleRate(e.sampleRate); }
