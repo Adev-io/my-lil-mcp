@@ -539,7 +539,7 @@ void RackMcpServer::process(const ProcessArgs& args) {
 
     if (meterReset.exchange(0)) meter.reset();
     meter.push(inputs[LISTEN_L_INPUT].getVoltage() * 0.1f, inputs[LISTEN_R_INPUT].getVoltage() * 0.1f);
-    face.push((inputs[LISTEN_L_INPUT].getVoltage() + inputs[LISTEN_R_INPUT].getVoltage()) * 0.1f, args.sampleRate);
+    face.push(0.2f * (inputs[LISTEN_R_INPUT].isConnected() ? 0.5f * (inputs[LISTEN_L_INPUT].getVoltage() + inputs[LISTEN_R_INPUT].getVoltage()) : inputs[LISTEN_L_INPUT].getVoltage()), args.sampleRate);
     const int g = snapGen.load();
     if (g != snapDone.load()) { snap = meter.report(); snapDone.store(g); }
 }
