@@ -1467,11 +1467,10 @@ void RackHttpServer::start() {
 }
 
 void RackHttpServer::stop() {
-    if (running) {
-        running = false;   // first, so a measure in progress sees it and returns before the join waits on it
-        svr.stop();
-        if (serverThread.joinable()) serverThread.join();
-    }
+    // Unconditional: a listen() that failed (port in use) has already cleared `running`, but its thread still needs joining.
+    running.store(false);   // first, so a measure in progress sees it and returns before the join waits on it
+    svr.stop();
+    if (serverThread.joinable()) serverThread.join();
 }
 
 RackMcpServer::~RackMcpServer() { stopServer(); }
