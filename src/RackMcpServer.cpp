@@ -1295,11 +1295,21 @@ std::string RackHttpServer::dispatchTool(const std::string& name, const std::str
                 if (!listening)
                     return toolFail("Nothing is patched into the MCP module's LISTEN inputs. Pass moduleId/outputId, or add a cable into LISTEN L/R first.");
             }
+            const int64_t id = temp;
+            auto uncable = [rackApp, id]() {   // one definition for both paths, so they cannot drift
+                app::CableWidget* cw = rackApp->scene->rack->getCable(id);
+                if (cw) { rackApp->scene->rack->removeCable(cw); delete cw; }
+            };
             parent->meterReset.store(1);
             // Sleep the window in 50 ms slices against a deadline, so a server stop is noticed without drifting the window.
             const auto until = std::chrono::steady_clock::now() + std::chrono::milliseconds((int)(seconds * 1000));
             for (auto now = std::chrono::steady_clock::now(); now < until; now = std::chrono::steady_clock::now()) {
-                if (!running.load()) return toolFail("Server stopping; measurement abandoned");
+                if (!running.load()) {
+                    // Don't wait on the UI here (the stop is joining us). If the module is being destroyed Rack has
+                    // already removed its cables and this is a no-op; if the server was only disabled, the UI drains it.
+                    if (temp >= 0) taskQueue->post(uncable, "measure/uncable", std::make_shared<std::atomic<int>>(0));
+                    return toolFail("Server stopping; measurement abandoned");
+                }
                 std::this_thread::sleep_for(std::min<std::chrono::steady_clock::duration>(std::chrono::milliseconds(50), until - now));
             }
             const int g = parent->snapGen.fetch_add(1) + 1;
@@ -1307,13 +1317,7 @@ std::string RackHttpServer::dispatchTool(const std::string& name, const std::str
             const bool got = parent->snapDone.load() == g;
             const Meter::Report r = parent->snap;
             bool removed = true;
-            if (temp >= 0) {
-                const int64_t id = temp;
-                removed = taskQueue->postSync([rackApp, id]() {
-                    app::CableWidget* cw = rackApp->scene->rack->getCable(id);
-                    if (cw) { rackApp->scene->rack->removeCable(cw); delete cw; }
-                }, "measure/uncable");
-            }
+            if (temp >= 0) removed = taskQueue->postSync(uncable, "measure/uncable");
             if (!got) return toolFail("The audio engine is not running, so nothing was measured (or the MCP module is bypassed)");
             if (temp >= 0 && !removed) return toolFail("Measured, but the temporary cable " + std::to_string(temp) + " into LISTEN L could not be removed (UI thread busy); delete it with vcvrack_delete_cable and measure again");
             auto chJson = [&](int i) {
@@ -1467,6 +1471,9 @@ void RackHttpServer::start() {
 }
 
 void RackHttpServer::stop() {
+    // listen() may not have bound yet; wait (≤ 1 s) until it is running or has given up, or svr.stop() would be a no-op
+    // and the join would hang.
+    if (serverThread.joinable()) for (int i = 0; i < 200 && !svr.is_running() && running.load(); ++i) std::this_thread::sleep_for(std::chrono::milliseconds(5));
     // Unconditional: a listen() that failed (port in use) has already cleared `running`, but its thread still needs joining.
     running.store(false);   // first, so a measure in progress sees it and returns before the join waits on it
     svr.stop();

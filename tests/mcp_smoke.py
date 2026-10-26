@@ -194,7 +194,7 @@ def test_measure(base, vco):
     check(abs(m['left']['crestDb'] - 2.87) < 0.3, 'crest about 2.9 dB', m['left']['crestDb'])
     check(m['left']['clippedSamples'] == 0 and abs(m['left']['dcOffset']) < 0.01, 'no clips, no DC')
     check(m['right']['rmsDb'] < -100, 'nothing patched into R reads as floor', m['right']['rmsDb'])
-    check(abs(m['lufs'] + 9.75) < 0.6, 'one channel of a -6 dBFS parabolic sine is about -9.6 LUFS', m['lufs'])
+    check(abs(m['lufs'] + 9.75) < 0.6, 'one channel of a -6 dBFS parabolic sine is about -9.75 LUFS (parabola -9.58, true sine -9.90)', m['lufs'])
     check(not any(c['inputModuleId'] == mcp for c in call(base, 'vcvrack_list_cables')), 'temporary cable removed')
     try:
         call(base, 'vcvrack_measure', {'seconds': 0.2})
