@@ -1643,8 +1643,6 @@ RackMcpServerWidget::RackMcpServerWidget(RackMcpServer* module) {
     setPanel(createPanel(asset::plugin(pluginInstance, "res/Mcp.svg")));
     namespace L = layout::mcp;
     addChild(createWidget<ScrewBlack>(Vec(RACK_GRID_WIDTH, 0)));
-    addChild(createWidget<ScrewBlack>(Vec(box.size.x - 2 * RACK_GRID_WIDTH, 0)));
-    addChild(createWidget<ScrewBlack>(Vec(RACK_GRID_WIDTH, RACK_GRID_HEIGHT - RACK_GRID_WIDTH)));
     addChild(createWidget<ScrewBlack>(Vec(box.size.x - 2 * RACK_GRID_WIDTH, RACK_GRID_HEIGHT - RACK_GRID_WIDTH)));
     TalkingFace* f = createWidget<TalkingFace>(mm2px(Vec(L::FACE[0] - L::FACE[2], L::FACE[1] - L::FACE[2])));
     f->box.size = mm2px(Vec(2 * L::FACE[2], 2 * L::FACE[2]));
